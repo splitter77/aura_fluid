@@ -1,0 +1,1429 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aura Fluid</title>
+<style>
+  :root { --blur: 10px; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: #0e0f13; color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+  /* Écran d'accueil */
+  #home { display: flex; flex-direction: column; align-items: center; gap: 16px; text-align: center; padding: 24px; }
+  #pasteBtn {
+    font-size: 22px; font-weight: 600; padding: 18px 48px;
+    border: none; border-radius: 16px; cursor: pointer;
+    background: linear-gradient(135deg, #6c5ce7, #a66cff); color: white;
+    box-shadow: 0 10px 30px rgba(108, 92, 231, .4);
+    transition: transform .15s;
+  }
+  #pasteBtn:active { transform: scale(.96); }
+  #hint { opacity: .6; font-size: 14px; max-width: 360px; }
+  #error { color: #ff7b7b; font-size: 14px; min-height: 1em; }
+
+  /* Vue image */
+  #viewer { display: none; position: fixed; inset: 0; align-items: center; justify-content: center; cursor: pointer; }
+  #stage { position: relative; line-height: 0; }
+  #stage img { max-width: 100vw; max-height: 100vh; display: block; user-select: none; -webkit-user-drag: none; }
+  .icon-box {
+    position: absolute; border-radius: 22%;
+    backdrop-filter: blur(0px); -webkit-backdrop-filter: blur(0px);
+    transition: backdrop-filter .35s ease, -webkit-backdrop-filter .35s ease;
+    pointer-events: none;
+  }
+  .icon-box.badge { border-radius: 999px; }
+  #melt { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; display: none; z-index: 1; }
+  #stage.debug .icon-box { outline: 2px solid rgba(0,255,140,.85); }
+  #stage.blurred .icon-box {
+    backdrop-filter: blur(var(--blur)); -webkit-backdrop-filter: blur(var(--blur));
+  }
+
+</style>
+</head>
+<body>
+
+<div id="home">
+  <button id="pasteBtn">📋 Coller</button>
+  <div id="hint">Copie une capture d'écran, puis clique sur « Coller » (ou fais Ctrl/⌘ + V).</div>
+  <div id="error"></div>
+</div>
+
+<div id="viewer">
+  <div id="stage"><img id="img" alt="" /><canvas id="melt"></canvas></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const home = $('home'), viewer = $('viewer'), stage = $('stage'), img = $('img');
+
+let currentImage = null; // HTMLImageElement chargée
+
+/* ---------- Récupération du presse-papier ---------- */
+
+$('pasteBtn').addEventListener('click', async () => {
+  $('error').textContent = '';
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.read) throw new Error('unsupported');
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const type = item.types.find((t) => t.startsWith('image/'));
+      if (type) return loadFromBlob(await item.getType(type));
+    }
+    $('error').textContent = "Aucune image dans le presse-papier.";
+  } catch (e) {
+    $('error').textContent = e.message === 'unsupported'
+      ? "Ton navigateur ne permet pas la lecture directe : utilise Ctrl/⌘ + V."
+      : "Accès au presse-papier refusé. Essaie Ctrl/⌘ + V.";
+  }
+});
+
+// Fallback : Ctrl/⌘ + V n'importe quand
+window.addEventListener('paste', (e) => {
+  const file = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'))?.getAsFile();
+  if (file) { e.preventDefault(); loadFromBlob(file); }
+});
+
+function loadFromBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  const im = new Image();
+  im.onload = () => {
+    currentImage = im;
+    img.src = url;
+    home.style.display = 'none';
+    viewer.style.display = 'flex';
+    stage.classList.remove('blurred');
+    runDetection();
+  };
+  im.onerror = () => { $('error').textContent = "Impossible de lire l'image."; };
+  im.src = url;
+}
+window.loadFromBlob = loadFromBlob;
+
+/* ---------- Détection des icônes ---------- */
+
+// Principe : une passe grossière sur une image réduite trouve les icônes (grille d'écran d'accueil,
+// sinon analyse générique), puis chaque bord est mesuré en pleine résolution et, en mode grille,
+// toutes les icônes sont recalées sur une taille commune et des rangées / colonnes partagées.
+function detectIcons(image) {
+  const nw = image.naturalWidth, nh = image.naturalHeight;
+  const grab = (w, h) => {
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(image, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h).data;
+  };
+
+  // 1. Réduction pour l'analyse grossière
+  const MAX = 1000;
+  const scale = Math.min(1, MAX / Math.max(nw, nh));
+  const W = Math.max(1, Math.round(nw * scale));
+  const H = Math.max(1, Math.round(nh * scale));
+  const px = grab(W, H);
+
+  // 2. Force des contours (gradient couleur)
+  const grad = new Uint16Array(W * H);
+  for (let y = 0; y < H - 1; y++) {
+    for (let x = 0; x < W - 1; x++) {
+      const p = y * W + x, i = p * 4, r = i + 4, d = i + W * 4;
+      let g = 0;
+      for (let c = 0; c < 3; c++) {
+        g = Math.max(g, Math.abs(px[i + c] - px[r + c]) + Math.abs(px[i + c] - px[d + c]));
+      }
+      grad[p] = g;
+    }
+  }
+
+  // 3. Écran d'accueil ? On cherche une grille régulière d'icônes de même taille
+  //    (bien plus fiable sur un fond d'écran photo). Sinon : analyse générique.
+  const squares = findSquares(px, grad, W, H);
+  const grid = detectGrid(px, grad, W, H, squares);
+  // hors grille : composantes connexes + carrés sûrs (qui retrouvent les icônes collées à leur texte)
+  const coarse = grid || detectLoose(px, grad, W, H).concat(squares.filter((q) => q.score >= 0.8));
+
+  // 4. Mesure fine en pleine résolution (plafonnée pour les très grandes images)
+  const fs = Math.min(1, 3000 / Math.max(nw, nh));
+  const FW = Math.max(1, Math.round(nw * fs)), FH = Math.max(1, Math.round(nh * fs));
+  const fpx = scale === fs ? px : grab(FW, FH);
+  const kx = FW / W, ky = FH / H;
+  let approx = coarse.map((b) => ({ x: b.x * kx, y: b.y * ky, w: b.w * kx, h: b.h * ky, weak: b.weak, group: b.group }));
+  // (hors grille, la boîte grossière est moins sûre : on cherche le bord plus loin)
+  let meas = approx.map((b) => measureEdges(fpx, FW, FH, b, grid ? 0.1 : 0.2, !!grid));
+  if (grid) {
+    // chaque case doit montrer de vrais bords droits, à la bonne place, en pleine résolution :
+    // au moins 2 pour une case sûre, 3 pour une case douteuse (sinon : case vide, widget, motif du fond…)
+    const keep = approx.map((b, i) => confirmCell(b, meas[i], b.weak ? 3 : 2));
+    approx = approx.filter((b, i) => keep[i]);
+    meas = meas.filter((m, i) => keep[i]);
+  }
+  const tight = grid ? alignGrid(approx, meas) : looseBoxes(approx, meas, fpx, FW, FH);
+
+  // 5. Sorties en coordonnées relatives (0..1) :
+  //    cut = au ras de l'icône (elle n'emporte pas de fond d'écran en tombant),
+  //    box = zone floutée, avec une petite marge (liseré des dossiers, anticrénelage).
+  const rel = (b) => ({ x: b.x / FW, y: b.y / FH, w: b.w / FW, h: b.h / FH });
+  const grow = (b, m) => ({ x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m });
+  const out = tight.map((b) => ({ ...rel(grow(b, 0.025 * b.w + 2)), cut: rel(b) }));
+
+  // 6. Pastilles de notification (rouges, en haut à droite de l'icône)
+  tight.forEach((b, i) => {
+    const badge = findBadge(fpx, FW, FH, b);
+    if (badge) out.push({ ...rel(grow(badge, 0.04 * badge.h + 1)), cut: rel(badge), badge: true, of: i });
+  });
+  return out;
+}
+
+// Analyse générique (captures hors écran d'accueil) : composantes connexes des contours,
+// multi-seuils (icônes peu contrastées) et multi-échelles :
+//   petite dilatation = garde l'icône séparée de son texte,
+//   grande dilatation = réunit les morceaux d'une icône "en traits".
+function detectLoose(px, grad, W, H) {
+  const N = W * H, minDim = Math.min(W, H);
+  const color = new Uint8Array(N);
+  for (let p = 0, i = 0; p < N; p++, i += 4) {
+    color[p] = Math.max(px[i], px[i + 1], px[i + 2]) - Math.min(px[i], px[i + 1], px[i + 2]) > 50 ? 1 : 0;
+  }
+  const colorSum = integral(color, W, H);
+  const sumIn = (S, b) => {
+    const x0 = Math.max(0, Math.floor(b.x)), y0 = Math.max(0, Math.floor(b.y));
+    const x1 = Math.min(W, Math.ceil(b.x + b.w)), y1 = Math.min(H, Math.ceil(b.y + b.h));
+    if (x1 <= x0 || y1 <= y0) return 0;
+    const w1 = W + 1;
+    return S[y1 * w1 + x1] - S[y0 * w1 + x1] - S[y1 * w1 + x0] + S[y0 * w1 + x0];
+  };
+
+  const minSide = Math.max(8, minDim * 0.045); // plus petit : du texte, pas une icône
+  const maxSide = minDim * 0.45;
+  const isIconShape = (b) =>
+    b.w >= minSide && b.h >= minSide && b.w <= maxSide && b.h <= maxSide &&
+    b.w / b.h >= 0.8 && b.w / b.h <= 1.25 &&
+    b.x > 1 && b.y > 1 && b.x + b.w < W - 1 && b.y + b.h < H - 1; // coupée par le bord de l'image : on ignore
+
+  const unit = Math.max(1, minDim / 500);
+  const radii = [...new Set([1, 2, 3, 5, 8].map((r) => Math.max(1, Math.round(r * unit))))];
+  const candidates = [];
+  for (const T of [22, 40]) {
+    const edge = new Uint8Array(N);
+    for (let p = 0; p < N; p++) edge[p] = grad[p] > T ? 1 : 0;
+    const edgeSum = integral(edge, W, H);
+    for (const R of radii) {
+      const boxes = components(dilate(edge, W, H, R), W, H)
+        .map((b) => ({ x: b.x + R, y: b.y + R, w: b.w - 2 * R, h: b.h - 2 * R }))
+        .filter((b) => b.w > 2 && b.h > 2);
+
+      for (const b of boxes) {
+        if (!isIconShape(b)) continue;
+        const area = b.w * b.h;
+        const edges = sumIn(edgeSum, b);
+        if (edges < (b.w + b.h) * 0.9) continue;          // trop vide
+        if (edges > area * 0.55) continue;                 // texture / bruit
+        const colorful = sumIn(colorSum, b) / area;
+        // Rejet du texte : une lettre a des voisines de même hauteur, alignées et très proches.
+        if (colorful < 0.15 && looksLikeText(b, boxes)) continue;
+        candidates.push(b);
+      }
+    }
+  }
+
+  // Fusion des candidats des différentes échelles
+  const squareness = (b) => Math.min(b.w, b.h) / Math.max(b.w, b.h); // 1 = carré parfait
+  candidates.sort((a, b) => a.w * a.h - b.w * b.h);
+  const kept = [];
+  for (const c of candidates) {
+    const dupe = kept.findIndex((k) => iou(c, k) > 0.6);
+    if (dupe === -1) kept.push(c);
+    else if (squareness(c) > squareness(kept[dupe]) + 0.03) kept[dupe] = c; // on garde la plus carrée
+  }
+  // Grandes boîtes d'abord :
+  //  - englobe plusieurs icônes → groupe fusionné… ou dossier : mis de côté, la mesure fine tranchera ;
+  //  - englobe une seule boîte presque aussi grande mais plus carrée (icône + texte) → on jette l'englobante ;
+  //  - sinon c'est une icône, et ce qu'elle contient (son dessin intérieur) est ignoré.
+  kept.sort((a, b) => b.w * b.h - a.w * a.h);
+  const final = [], groups = [];
+  for (const c of kept) {
+    if (final.some((f) => overlap(c, f) > 0.5 * c.w * c.h)) continue;
+    if (groups.some((g) => iou(c, g) > 0.6)) continue;
+    const area = c.w * c.h;
+    const children = kept.filter((k) => k !== c && overlap(k, c) > 0.8 * k.w * k.h && k.w * k.h > 0.12 * area);
+    const big = children.filter((k) => k.w * k.h > 0.55 * area);
+    if (big.some((k) => squareness(k) > squareness(c) + 0.03)) continue;
+    if (!big.length && children.length >= 2) { groups.push({ ...c, group: true }); continue; }
+    final.push(c);
+  }
+  return final.concat(groups);
+}
+
+/* ---------- Mesure fine des bords (pleine résolution) ---------- */
+
+// Pour chaque côté, on balaie des lignes perpendiculaires au bord, prises dans la partie droite
+// du côté (les coins d'une icône iOS sont des « squircles » qui s'arrondissent sur ~1/3 du côté).
+// Le vrai bord est une ligne droite : le saut de couleur s'y retrouve au même endroit sur
+// presque toutes les lignes, contrairement au dessin intérieur ou au fond d'écran.
+// reach : demi-largeur de la zone de recherche autour du bord estimé (en fraction de la taille) ;
+// outer : prendre le pic fort le plus à l'extérieur (sinon le plus fort, si la zone est large).
+// Renvoie pour chaque côté { p: position du bord (coordonnée continue), ok: mesure fiable }.
+function measureEdges(px, W, H, b, reach = 0.1, outer = true) {
+  const s = (b.w + b.h) / 2, win = Math.max(3, Math.round(reach * s)), n = 24;
+  const at = (x, y) => {
+    x = x < 0 ? 0 : x >= W ? W - 1 : x; y = y < 0 ? 0 : y >= H ? H - 1 : y;
+    return (y * W + x) * 4;
+  };
+  const res = {};
+  for (const side of ['L', 'R', 'T', 'B']) {
+    const horiz = side === 'L' || side === 'R';
+    const e0 = side === 'L' ? b.x : side === 'R' ? b.x + b.w : side === 'T' ? b.y : b.y + b.h;
+    const lo = Math.round(e0 - win), len = 2 * win + 1;
+    const g = new Float32Array(n * len);
+    for (let k = 0; k < n; k++) {
+      const u = Math.round(horiz ? b.y + b.h * (0.38 + 0.24 * k / (n - 1)) : b.x + b.w * (0.38 + 0.24 * k / (n - 1)));
+      for (let j = 0; j < len; j++) {
+        const t = lo + j; // bord entre les pixels t-1 et t
+        const i = horiz ? at(t - 1, u) : at(u, t - 1), q = horiz ? at(t, u) : at(u, t);
+        g[k * len + j] = Math.abs(px[i] - px[q]) + Math.abs(px[i + 1] - px[q + 1]) + Math.abs(px[i + 2] - px[q + 2]);
+      }
+    }
+    // cohérence : valeur dépassée par ~70 % des lignes (un dessin intérieur ne couvre pas toutes les lignes)
+    const A = new Float32Array(len), col = new Float32Array(n);
+    for (let j = 0; j < len; j++) {
+      for (let k = 0; k < n; k++) col[k] = g[k * len + j];
+      col.sort();
+      A[j] = col[Math.floor(n * 0.3)];
+    }
+    let max = 0;
+    for (let j = 0; j < len; j++) max = Math.max(max, A[j]);
+    // pic le plus à l'extérieur parmi les pics forts (le contour de l'icône, pas son dessin)
+    const outward = side === 'L' || side === 'T';
+    let pk = -1;
+    for (let jj = 0; jj < len; jj++) {
+      const j = outward ? jj : len - 1 - jj;
+      const prev = j > 0 ? A[j - 1] : -1, next = j < len - 1 ? A[j + 1] : -1;
+      if (A[j] >= (outer ? 0.5 : 1) * max && A[j] >= prev && A[j] >= next) { pk = j; break; }
+    }
+    // précision sous-pixel (parabole sur le pic)
+    let off = 0;
+    if (pk > 0 && pk < len - 1) {
+      const a = A[pk - 1], c = A[pk + 1], d = a - 2 * A[pk] + c;
+      if (d < 0) off = Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / d));
+    }
+    const sorted = [...A].sort((x, y) => x - y), med = sorted[len >> 1];
+    // fiable si le saut est net, cohérent, et ressort nettement du reste de la fenêtre
+    const ok = pk >= 0 && max >= 18 && max >= 2.2 * med + 6;
+    res[side] = { p: lo + pk + off, ok, v: max };
+  }
+  return res;
+}
+
+function confirmCell(b, m, need) {
+  // bords nets trouvés près de leur place attendue (la taille grossière peut être un peu fausse)
+  const ref = { L: b.x, R: b.x + b.w, T: b.y, B: b.y + b.h };
+  return ['L', 'R', 'T', 'B'].filter((k) => m[k].ok && Math.abs(m[k].p - ref[k]) <= 0.1 * b.w).length >= need;
+}
+
+const median = (arr) => {
+  if (!arr.length) return NaN;
+  const s = [...arr].sort((a, b) => a - b), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+// Centre et taille mesurés d'une icône sur un axe ; repli sur la boîte grossière si un bord manque.
+// (deux bords qui ne sont pas à la bonne distance l'un de l'autre : mesure incohérente, ignorée)
+function axisFit(m, a, b, c0, S) {
+  if (m[a].ok && m[b].ok) {
+    if (Math.abs(m[b].p - m[a].p - S) <= 0.04 * S) return { c: (m[a].p + m[b].p) / 2, ok: 2 };
+    return { c: c0, ok: 0 };
+  }
+  if (m[a].ok) return { c: m[a].p + S / 2, ok: 1 };
+  if (m[b].ok) return { c: m[b].p - S / 2, ok: 1 };
+  return { c: c0, ok: 0 };
+}
+
+// Mode grille : taille commune, rangées partagées, colonnes partagées par bloc
+// (le dock forme son propre bloc : ses colonnes ne tombent pas forcément sur celles de la grille).
+function alignGrid(approx, meas) {
+  const sizes = [];
+  meas.forEach((m) => {
+    if (m.L.ok && m.R.ok) sizes.push(m.R.p - m.L.p);
+    if (m.T.ok && m.B.ok) sizes.push(m.B.p - m.T.p);
+  });
+  const S0 = median(approx.map((b) => (b.w + b.h) / 2));
+  // tailles aberrantes (bord intérieur pris pour le contour) écartées avant la médiane
+  let S = median(sizes.filter((v) => Math.abs(v - S0) < 0.15 * S0));
+  if (!(S > 0)) S = S0;
+  const fit = approx.map((b, i) => ({
+    x: axisFit(meas[i], 'L', 'R', b.x + b.w / 2, S),
+    y: axisFit(meas[i], 'T', 'B', b.y + b.h / 2, S),
+  }));
+  // rangées : centre = médiane des centres mesurés (les plus fiables d'abord)
+  const level = (list, key) => Math.max(...list.map((i) => fit[i][key].ok));
+  const best = (list, key) => {
+    const lvl = level(list, key);
+    return median(list.filter((i) => fit[i][key].ok === lvl).map((i) => fit[i][key].c));
+  };
+  const groups = (idx, key, ref) => {
+    const sorted = [...idx].sort((a, b) => ref(a) - ref(b)), out = [];
+    for (const i of sorted) {
+      const g = out[out.length - 1];
+      if (g && ref(i) - ref(g[g.length - 1]) < 0.5 * S) g.push(i); else out.push([i]);
+    }
+    return out;
+  };
+  const all = approx.map((b, i) => i);
+  const rows = groups(all, 'y', (i) => approx[i].y + approx[i].h / 2).map((g) => ({ g, c: best(g, 'y') }));
+  // blocs : rangées consécutives séparées par le pas régulier de la grille
+  const gaps = rows.slice(1).map((r, i) => r.c - rows[i].c);
+  // pas de la grille = écart le plus fréquent (une rangée parasite ne doit pas le fausser)
+  const support = (g) => gaps.filter((h) => Math.abs(h - g) < 0.04 * g).length;
+  const pitch = gaps.reduce((a, g) => (support(g) > support(a) || (support(g) === support(a) && g < a) ? g : a), gaps[0] || 0);
+  const blocks = [];
+  rows.forEach((r, i) => {
+    if (i && Math.abs(gaps[i - 1] - pitch) < 0.04 * pitch) blocks[blocks.length - 1].push(r);
+    else blocks.push([r]);
+  });
+  const cx = new Float64Array(approx.length), cy = new Float64Array(approx.length);
+  // bloc principal (le plus d'icônes) d'abord : ses colonnes servent de repli aux autres blocs
+  const size = (blk) => blk.reduce((n, r) => n + r.g.length, 0);
+  blocks.sort((a, b) => size(b) - size(a));
+  const mainCols = [];
+  blocks.forEach((blk, bi) => {
+    const idx = blk.flatMap((r) => r.g);
+    for (const r of blk) for (const i of r.g) cy[i] = r.c;
+    for (const col of groups(idx, 'x', (i) => approx[i].x + approx[i].w / 2)) {
+      let c = best(col, 'x');
+      if (!bi) mainCols.push(c);
+      else if (!level(col, 'x')) {
+        // aucune mesure fiable dans cette colonne : on s'aligne sur la grille principale si elle est proche
+        const near = mainCols.reduce((a, v) => (Math.abs(v - c) < Math.abs(a - c) ? v : a), Infinity);
+        if (Math.abs(near - c) < 0.15 * S) c = near;
+      }
+      for (const i of col) cx[i] = c;
+    }
+  });
+  return approx.map((b, i) => ({ x: cx[i] - S / 2, y: cy[i] - S / 2, w: S, h: S }));
+}
+
+// Hors grille : chaque icône garde sa propre mesure (carrée) ; une boîte sans au moins
+// 3 vrais bords droits n'est pas une icône (texture, visage, texte…).
+// Une boîte « groupe » (englobant plusieurs petites) n'est gardée que si ses 4 bords sont nets et
+// forment un carré : c'est alors un dossier, et son contenu (mini-icônes) est ignoré.
+function looseBoxes(approx, meas, px, W, H) {
+  let cand = [];
+  approx.forEach((b, i) => {
+    const m = meas[i], nOk = ['L', 'R', 'T', 'B'].filter((k) => m[k].ok).length;
+    if (nOk < (b.group ? 4 : 3)) return;
+    const w = m.L.ok && m.R.ok ? m.R.p - m.L.p : NaN, h = m.T.ok && m.B.ok ? m.B.p - m.T.p : NaN;
+    const ref = (b.w + b.h) / 2, ms = [w, h].filter((v) => v > 0);
+    // la mesure doit être carrée et rester proche de la boîte grossière (plus large tolérance
+    // quand les deux dimensions sont mesurées et concordent)
+    if (ms.length === 2 && Math.abs(w - h) > 0.08 * Math.max(w, h)) return;
+    const tol = ms.length === 2 ? [0.75, 1.3] : [0.85, 1.15];
+    if (ms.some((v) => v < tol[0] * ref || v > tol[1] * ref)) return;
+    const S = ms.length ? median(ms) : ref;
+    const x = axisFit(m, 'L', 'R', b.x + b.w / 2, S).c - S / 2, y = axisFit(m, 'T', 'B', b.y + b.h / 2, S).c - S / 2;
+    if (x < -1 || y < -1 || x + S > W + 1 || y + S > H + 1) return; // déborde de l'image
+    cand.push({ x, y, w: S, h: S, q: nOk });
+  });
+  const folders = findFolders(cand, px, W, H);
+  // cercle (avatar, bouton, pastille…) : pas une icône
+  cand = cand.filter((c) => squircleCorners(px, W, H, c) >= 3).concat(folders);
+  // les mieux mesurées (puis les plus grandes) d'abord ; ce qui est contenu dans une icône
+  // déjà retenue (son logo, les mini-icônes d'un dossier, un doublon) est ignoré
+  cand.sort((a, b) => b.q - a.q || b.w - a.w);
+  const out = [];
+  for (const c of cand) {
+    if (out.some((k) => overlap(c, k) > 0.3 * c.w * c.h)) continue;
+    out.push({ x: c.x, y: c.y, w: c.w, h: c.h });
+  }
+  return out;
+}
+
+// Coins « pleins » : près de la diagonale de chaque coin, un squircle d'icône est encore à l'intérieur,
+// un cercle déjà à l'extérieur. On compare la couleur à cet endroit à celle juste à l'intérieur
+// et juste à l'extérieur des bords voisins. Renvoie le nombre de coins pleins (0 à 4).
+function squircleCorners(px, W, H, b) {
+  const S = b.w;
+  const col = (u, v) => {
+    const x = Math.min(W - 1, Math.max(0, Math.round(b.x + u * S))), y = Math.min(H - 1, Math.max(0, Math.round(b.y + v * S)));
+    const i = (y * W + x) * 4;
+    return [px[i], px[i + 1], px[i + 2]];
+  };
+  const d = (a, c) => Math.abs(a[0] - c[0]) + Math.abs(a[1] - c[1]) + Math.abs(a[2] - c[2]);
+  let full = 0;
+  for (const [sx, sy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+    const f = (t, s) => (s ? 1 - t : t); // coordonnée mesurée depuis le coin
+    const p = col(f(0.12, sx), f(0.12, sy));
+    const inn = [col(f(0.06, sx), f(0.32, sy)), col(f(0.32, sx), f(0.06, sy))];
+    const out = [col(f(-0.04, sx), f(0.32, sy)), col(f(0.32, sx), f(-0.04, sy))];
+    const di = Math.min(...inn.map((c) => d(p, c))), dout = Math.min(...out.map((c) => d(p, c)));
+    // plein : ressemble au bord intérieur, ou du moins nettement différent de l'extérieur (icône chargée)
+    if (di <= dout || dout > 60) full++;
+  }
+  return full;
+}
+
+// Dossier vu hors grille : ses mini-icônes (≥ 3 voisines, même taille, pas serré ≈ 1,2 × leur taille,
+// rangées remplies depuis le haut à gauche) sont détectées comme des icônes. On mesure le dossier
+// supposé autour d'elles : s'il a 4 bords nets et carrés, il passe devant (son contenu sera ignoré).
+function findFolders(boxes, px, W, H) {
+  const cx = (b) => b.x + b.w / 2, cy = (b) => b.y + b.h / 2;
+  const linked = (a, b) => Math.abs(a.w - b.w) < 0.2 * a.w &&
+    Math.abs(cx(a) - cx(b)) < 1.5 * a.w && Math.abs(cy(a) - cy(b)) < 1.5 * a.w;
+  const seen = new Set(), out = [];
+  for (const b of boxes) {
+    if (seen.has(b)) continue;
+    const grp = [b];
+    seen.add(b);
+    for (let i = 0; i < grp.length; i++) for (const k of boxes) if (!seen.has(k) && linked(grp[i], k)) { seen.add(k); grp.push(k); }
+    if (grp.length < 3) continue;
+    const s = median(grp.map((k) => k.w));
+    const xs = grp.map(cx).sort((a, c) => a - c), ys = grp.map(cy).sort((a, c) => a - c);
+    const steps = xs.slice(1).map((v, i) => v - xs[i]).concat(ys.slice(1).map((v, i) => v - ys[i])).filter((d) => d > 0.6 * s);
+    const pitch = steps.length ? median(steps) : 1.2 * s;
+    const F = 4 * pitch; // 3 mini-icônes + 2 marges ≈ 4 pas
+    const margin = (F - 2 * pitch - s) / 2;
+    const guess = { x: xs[0] - s / 2 - margin, y: ys[0] - s / 2 - margin, w: F, h: F };
+    const m = measureEdges(px, W, H, guess, 0.12);
+    if (!['L', 'R', 'T', 'B'].every((k) => m[k].ok)) continue;
+    const w = m.R.p - m.L.p, h = m.B.p - m.T.p;
+    if (Math.abs(w - h) > 0.06 * w || Math.abs(w - F) > 0.15 * F) continue;
+    const S = (w + h) / 2;
+    out.push({ x: (m.L.p + m.R.p - S) / 2, y: (m.T.p + m.B.p - S) / 2, w: S, h: S, q: 5 });
+  }
+  return out;
+}
+
+// Pastille rouge en haut à droite de l'icône (mesurée en pleine résolution).
+function findBadge(px, W, H, icon) {
+  const s = Math.max(icon.w, icon.h);
+  const x0 = Math.max(0, Math.round(icon.x + 0.5 * s)), x1 = Math.min(W - 1, Math.round(icon.x + 1.4 * s));
+  const y0 = Math.max(0, Math.round(icon.y - 0.4 * s)), y1 = Math.min(H - 1, Math.round(icon.y + 0.5 * s));
+  if (x1 <= x0 || y1 <= y0) return null;
+  const redness = (x, y) => {
+    const i = (y * W + x) * 4, r = px[i];
+    return r > 150 ? r - Math.max(px[i + 1], px[i + 2]) : 0;
+  };
+  const isRed = (x, y) => {
+    const i = (y * W + x) * 4, r = px[i], g = px[i + 1], b = px[i + 2];
+    return r > 170 && r - g > 90 && r - b > 80;
+  };
+  // départ : pixels rouges situés hors de l'icône (au-dessus ou à droite), pour ne pas confondre avec un dessin rouge de l'icône
+  const bw = x1 - x0 + 1, seen = new Uint8Array(bw * (y1 - y0 + 1));
+  const stack = [];
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const outside = y < icon.y || x >= icon.x + icon.w;
+    if (outside && isRed(x, y)) { stack.push(x, y); seen[(y - y0) * bw + x - x0] = 1; }
+  }
+  if (stack.length / 2 < s * s * 0.004) return null;
+  let minX = W, minY = H, maxX = 0, maxY = 0;
+  while (stack.length) {
+    const y = stack.pop(), x = stack.pop();
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    for (let d = 0; d < 4; d++) {
+      const nx = x + (d === 0) - (d === 1), ny = y + (d === 2) - (d === 3);
+      if (nx < x0 || ny < y0 || nx > x1 || ny > y1) continue;
+      const q = (ny - y0) * bw + nx - x0;
+      if (seen[q]) continue;
+      seen[q] = 1;
+      if (isRed(nx, ny)) stack.push(nx, ny);
+    }
+  }
+  const w = maxX - minX + 1, h = maxY - minY + 1;
+  if (h < 0.12 * s || h > 0.6 * s || w > 1.2 * s || w < 0.8 * h) return null; // pas une pastille
+  if (maxX >= x1 || minY <= y0) return null; // touche le bord de la zone : c'est autre chose (icône voisine…)
+  // bord anticrénelé : on avance d'un demi-pixel par côté si la rangée / colonne voisine est encore un peu rouge
+  const fringe = (xa, ya, xb, yb) => {
+    let m = 0;
+    for (let y = Math.max(0, ya); y <= Math.min(H - 1, yb); y++) for (let x = Math.max(0, xa); x <= Math.min(W - 1, xb); x++) m = Math.max(m, redness(x, y));
+    return m > 40 ? 0.5 : 0;
+  };
+  const l = fringe(minX - 1, minY, minX - 1, maxY), r = fringe(maxX + 1, minY, maxX + 1, maxY);
+  const t = fringe(minX, minY - 1, maxX, minY - 1), b = fringe(minX, maxY + 1, maxX, maxY + 1);
+  return { x: minX - l, y: minY - t, w: w + l + r, h: h + t + b };
+}
+
+/* ---------- Mode grille (écran d'accueil) ---------- */
+
+// Score d'un carré : part des points de chaque côté (partie droite, hors coins arrondis)
+// qui tombent sur un contour. On garde le plus faible des 4 côtés.
+// need : score minimal attendu ; on abandonne (0) dès qu'il devient inatteignable (balayage rapide).
+function sideScore(m, W, x, y, s, need = 0) {
+  const n = 10, maxMiss = n - Math.ceil(need * n - 1e-9);
+  const o = sideOffsets(s);
+  // les 4 côtés sont parcourus en parallèle : un côté vide fait abandonner au plus tôt
+  const top = y * W + x, bottom = (y + s - 1) * W + x, right = top + s - 1;
+  let c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+  for (let k = 0; k < n; k++) {
+    const ok = o[k], ov = ok * W, lim = k + 1 - maxMiss;
+    if (m[top + ok]) c0++; else if (c0 < lim) return 0;
+    if (m[bottom + ok]) c1++; else if (c1 < lim) return 0;
+    if (m[top + ov]) c2++; else if (c2 < lim) return 0;
+    if (m[right + ov]) c3++; else if (c3 < lim) return 0;
+  }
+  return Math.min(c0, c1, c2, c3) / n;
+}
+
+// positions des 10 points le long d'un côté (partie droite), mémorisées par taille (appel très fréquent)
+function sideOffsets(s) {
+  let o = sideOffsets.cache[s];
+  if (!o) {
+    o = sideOffsets.cache[s] = new Int32Array(10);
+    for (let k = 0; k < 10; k++) o[k] = Math.round(s * (0.25 + 0.5 * k / 9));
+  }
+  return o;
+}
+sideOffsets.cache = {};
+
+// Intérieur près du bord uniforme (fond de l'icône) et différent de l'extérieur.
+function ringScore(px, W, H, x, y, s) {
+  const n = 10, ins = Math.max(2, Math.round(s * 0.1)), ou = Math.max(2, Math.round(s * 0.06));
+  const o = sideOffsets(s);
+  const inC = ringScore.inC, outC = ringScore.outC;
+  let ni = 0, no = 0;
+  // 4 points par position le long du bord : 2 côtés horizontaux, 2 verticaux (à l'intérieur puis à l'extérieur)
+  for (let k = 0; k < n; k++) {
+    const ok = o[k];
+    for (let j = 0; j < 8; j++) {
+      const d = j < 4 ? ins : -ou, inside = j < 4;
+      const side = j & 3;
+      const qx = side < 2 ? x + ok : side === 2 ? x + d : x + s - 1 - d;
+      const qy = side < 2 ? (side === 0 ? y + d : y + s - 1 - d) : y + ok;
+      if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
+      const i = (qy * W + qx) * 4;
+      if (inside) { inC[ni * 3] = px[i]; inC[ni * 3 + 1] = px[i + 1]; inC[ni * 3 + 2] = px[i + 2]; ni++; }
+      else { outC[no * 3] = px[i]; outC[no * 3 + 1] = px[i + 1]; outC[no * 3 + 2] = px[i + 2]; no++; }
+    }
+  }
+  if (!ni) return { uni: 0, diff: 0 };
+  // couleur médiane du bord intérieur, canal par canal
+  const v = ringScore.ch.subarray(0, ni);
+  const med = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    for (let j = 0; j < ni; j++) v[j] = inC[j * 3 + c];
+    med[c] = kth(v, ni >> 1);
+  }
+  let u = 0, df = 0;
+  for (let j = 0; j < ni; j++) {
+    if (Math.abs(inC[j * 3] - med[0]) + Math.abs(inC[j * 3 + 1] - med[1]) + Math.abs(inC[j * 3 + 2] - med[2]) < 45) u++;
+  }
+  for (let j = 0; j < no; j++) {
+    if (Math.abs(outC[j * 3] - med[0]) + Math.abs(outC[j * 3 + 1] - med[1]) + Math.abs(outC[j * 3 + 2] - med[2]) > 45) df++;
+  }
+  return { uni: u / ni, diff: df / Math.max(1, no) };
+}
+ringScore.inC = new Uint8Array(120); ringScore.outC = new Uint8Array(120); ringScore.ch = new Uint8Array(40);
+
+// k-ième plus petite valeur (sélection rapide, modifie le tableau)
+function kth(a, k) {
+  let lo = 0, hi = a.length - 1;
+  while (lo < hi) {
+    const piv = a[(lo + hi) >> 1];
+    let i = lo, j = hi;
+    while (i <= j) {
+      while (a[i] < piv) i++;
+      while (a[j] > piv) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+  }
+  return a[k];
+}
+
+// Carrés « sûrs » : 4 côtés nets, bord intérieur uniforme, contraste avec l'extérieur.
+// On ignore les petits carrés contenus dans un plus grand (ex. mini-icônes d'un dossier).
+function findSquares(px, grad, W, H) {
+  const N = W * H, minDim = Math.min(W, H);
+
+  const e = new Uint8Array(N);
+  for (let p = 0; p < N; p++) e[p] = grad[p] > 24 ? 1 : 0;
+  // contours épaissis : tolère un pas de balayage grossier
+  const m = dilate(e, W, H, Math.max(2, Math.round(minDim / 200)));
+  const seeds = [];
+  for (let S = minDim * 0.06; S <= minDim * 0.45; S *= 1.04) {
+    const s = Math.round(S), step = Math.max(1, Math.round(s / 16));
+    for (let y = 0; y + s < H; y += step) for (let x = 0; x + s < W; x += step) {
+      const e = sideScore(m, W, x, y, s, 0.7);
+      if (e < 0.7) continue;
+      const { uni, diff } = ringScore(px, W, H, x, y, s);
+      const score = e * (0.5 + 0.5 * uni) * diff;
+      if (score >= 0.5) seeds.push({ x, y, w: s, h: s, score });
+    }
+  }
+  seeds.sort((a, b) => b.score - a.score);
+  const strong = [];
+  // suppression des doublons entre carrés de taille voisine seulement : un petit carré net à l'intérieur
+  // d'une icône (logo, mini-icône de dossier) ne doit pas masquer l'icône elle-même (trié plus bas)
+  for (const c of seeds) if (!strong.some((k) => iou(c, k) > 0.3 && Math.max(c.w, k.w) < 1.3 * Math.min(c.w, k.w))) strong.push(c);
+  return strong.filter((c) => !strong.some((k) => k.w > c.w * 1.3 && overlap(c, k) > 0.7 * c.w * c.h));
+}
+
+function detectGrid(px, grad, W, H, outer) {
+  const N = W * H;
+  const edgeMap = (T, R) => { const e = new Uint8Array(N); for (let p = 0; p < N; p++) e[p] = grad[p] > T ? 1 : 0; return dilate(e, W, H, R); };
+
+  // b) Taille dominante
+  // pour chaque taille possible, on mesure à quel point les carrés forment une grille (colonnes ET rangées partagées)
+  const cluster = (vals, tol) => {
+    vals = [...vals].sort((a, b) => a - b);
+    const out = [];
+    for (const v of vals) {
+      const last = out[out.length - 1];
+      if (last && v - last.v / last.n < tol) { last.v += v; last.n++; } else out.push({ v, n: 1 });
+    }
+    return out.map((c) => ({ c: c.v / c.n, n: c.n }));
+  };
+  const near = (cl, v) => cl.reduce((a, c) => (Math.abs(c.c - v) < Math.abs(a.c - v) ? c : a));
+  let best = [], bestQ = 0;
+  for (const c of outer) {
+    const g = outer.filter((k) => Math.abs(k.w - c.w) <= 0.1 * c.w);
+    if (g.length < 5) continue;
+    const tol = 0.4 * c.w;
+    const cx = cluster(g.map((b) => b.x + b.w / 2), tol), cy = cluster(g.map((b) => b.y + b.h / 2), tol);
+    const aligned = g.filter((b) => near(cx, b.x + b.w / 2).n >= 2 && near(cy, b.y + b.h / 2).n >= 2).length;
+    const q = (aligned * aligned / (cx.length * cy.length)) * c.w;
+    if (q > bestQ) { bestQ = q; best = g; }
+  }
+  if (best.length < 5) return null;
+  const S = best.map((b) => b.w).sort((a, b) => a - b)[best.length >> 1];
+
+  // c) Colonnes (au moins 2 icônes sûres) et rangées
+  const tol = 0.4 * S;
+  // deux icônes ne se chevauchent pas : des lignes plus proches que 0,8 × la taille sont des doublons
+  // (on garde la mieux soutenue)
+  const distinct = (cl) => {
+    const out = [];
+    for (const c of [...cl].sort((a, b) => b.n - a.n)) if (!out.some((o) => Math.abs(o.c - c.c) < 0.8 * S)) out.push(c);
+    return out.map((c) => c.c);
+  };
+  const colCl = cluster(best.map((b) => b.x + b.w / 2), tol);
+  let cols = distinct(colCl.filter((c) => c.n >= 2));
+  // une rangée peut ne contenir qu'une icône sûre (ex. le dock), si celle-ci est dans une colonne connue
+  const onCol = best.filter((b) => cols.some((c) => Math.abs(c - (b.x + b.w / 2)) < tol));
+  let rows = distinct(cluster(onCol.map((b) => b.y + b.h / 2), tol));
+  if (cols.length < 2 || rows.length < 2) return null;
+  // colonnes / rangées manquantes : on teste aussi un pas de grille avant/après et dans les trous
+  const extend = (lines, max) => {
+    if (lines.length < 2) return lines;
+    const pitch = Math.min(...lines.slice(1).map((v, i) => v - lines[i]));
+    const extra = [];
+    for (let v = lines[0] - pitch; v - S / 2 >= -0.05 * S; v -= pitch) extra.push(v);
+    for (let v = lines[lines.length - 1] + pitch; v + S / 2 <= max + 0.05 * S; v += pitch) extra.push(v);
+    for (let i = 1; i < lines.length; i++) for (let v = lines[i - 1] + pitch; v < lines[i] - 0.6 * pitch; v += pitch) extra.push(v);
+    return lines.concat(extra);
+  };
+  cols = extend(cols.sort((a, b) => a - b), W);
+  rows = extend(rows.sort((a, b) => a - b), H);
+
+  // d) Vérification de chaque case, avec un léger recalage.
+  //    Une case douteuse (icône claire sur fond clair…) est gardée « à confirmer » : la mesure
+  //    fine en pleine résolution décidera (detectIcons).
+  const mLow = edgeMap(14, 1);
+  const found = [];
+  const r = Math.round(0.2 * S);
+  for (const cy of rows) for (const cx of cols) {
+    let bestCell = null;
+    for (const f of [0.94, 1, 1.06]) {
+      const s = Math.round(S * f);
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const x = Math.round(cx - s / 2 + dx), y = Math.round(cy - s / 2 + dy);
+        if (x < 0 || y < 0 || x + s >= W || y + s >= H) continue;
+        const e = sideScore(mLow, W, x, y, s);
+        if (!bestCell || e > bestCell.e) bestCell = { x, y, w: s, h: s, e };
+      }
+    }
+    if (!bestCell) continue;
+    const { diff } = ringScore(px, W, H, bestCell.x, bestCell.y, bestCell.w);
+    if (bestCell.e < 0.85 || diff < 0.4) {
+      // recentrée sur la grille (le recalage n'a rien trouvé de fiable)
+      bestCell = { x: cx - S / 2, y: cy - S / 2, w: S, h: S, e: 0, weak: true };
+      if (bestCell.x < 0 || bestCell.y < 0 || bestCell.x + S > W || bestCell.y + S > H) continue;
+    }
+    found.push(bestCell);
+  }
+  // une seule case par emplacement
+  found.sort((a, b) => b.e - a.e);
+  const cells = [];
+  for (const c of found) if (!cells.some((k) => iou(c, k) > 0.2)) cells.push(c);
+  return cells.filter((c) => !c.weak).length >= 4 ? cells : null;
+}
+
+function looksLikeText(b, boxes) {
+  let close = 0;
+  for (const o of boxes) {
+    if (o === b) continue;
+    const hr = o.h / b.h;
+    if (hr < 0.4 || hr > 2.5) continue;
+    const vOverlap = Math.min(b.y + b.h, o.y + o.h) - Math.max(b.y, o.y);
+    if (vOverlap < 0.5 * Math.min(b.h, o.h)) continue;
+    const gap = Math.max(o.x - (b.x + b.w), b.x - (o.x + o.w));
+    if (gap < 0.45 * b.h) close++;
+  }
+  return close >= 1;
+}
+
+function components(mask, W, H) {
+  const seen = new Uint8Array(W * H);
+  const stack = new Int32Array(W * H);
+  const out = [];
+  for (let s = 0; s < W * H; s++) {
+    if (!mask[s] || seen[s]) continue;
+    let sp = 0, minX = W, minY = H, maxX = 0, maxY = 0;
+    stack[sp++] = s; seen[s] = 1;
+    while (sp) {
+      const p = stack[--sp];
+      const x = p % W, y = (p / W) | 0;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const q = ny * W + nx;
+        if (mask[q] && !seen[q]) { seen[q] = 1; stack[sp++] = q; }
+      }
+    }
+    out.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 });
+  }
+  return out;
+}
+
+function integral(src, W, H) {
+  const w1 = W + 1, S = new Int32Array(w1 * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let row = 0;
+    for (let x = 0; x < W; x++) {
+      row += src[y * W + x];
+      S[(y + 1) * w1 + x + 1] = S[y * w1 + x + 1] + row;
+    }
+  }
+  return S;
+}
+
+function iou(a, b) {
+  const o = overlap(a, b);
+  return o / (a.w * a.h + b.w * b.h - o);
+}
+
+function dilate(src, W, H, R) {
+  // dilatation carrée séparable via sommes glissantes
+  const tmp = new Uint8Array(W * H), out = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    let sum = 0;
+    const row = y * W;
+    for (let x = -R; x < W + R; x++) {
+      const add = x + R, rem = x - R - 1;
+      if (add < W && add >= 0) sum += src[row + add];
+      if (rem >= 0 && rem < W) sum -= src[row + rem];
+      if (x >= 0 && x < W) tmp[row + x] = sum > 0 ? 1 : 0;
+    }
+  }
+  for (let x = 0; x < W; x++) {
+    let sum = 0;
+    for (let y = -R; y < H + R; y++) {
+      const add = y + R, rem = y - R - 1;
+      if (add < H && add >= 0) sum += tmp[add * W + x];
+      if (rem >= 0 && rem < H) sum -= tmp[rem * W + x];
+      if (y >= 0 && y < H) out[y * W + x] = sum > 0 ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+function overlap(a, b) {
+  const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+
+/* ---------- Affichage ---------- */
+
+let pieces = [];      // une pièce = une icône découpée (+ sa pastille), qui fond d'un bloc
+let state = 'idle';   // idle → melting ⇄ returning → idle
+let clock = 0, dir = 1, rafId = 0, lastNow = 0, bgId = 0, lastKey = '';
+const canvas = $('melt');
+let gl = null, prog = null, mesh = null;
+
+/* ---------- Simulation physique du plastique qui fond ----------
+ * Modèle : chaque icône est une fine couche de plastique collée au mur (l'écran), vue de face.
+ * Le maillage est lagrangien : chaque sommet est un point matériel qui transporte sa couleur.
+ *  - Masse conservée : chaque triangle garde son volume V ; épaisseur h = V / aire.
+ *  - Frottement de lubrification contre le mur : force = μ·aire/h · vitesse
+ *    → vitesse libre d'un film qui coule : u ≈ ρ g h² / μ (les zones épaisses coulent plus vite).
+ *  - Viscosité de membrane (feuille visqueuse mince) : σ = 2 μ h (D + tr(D) I)
+ *    → un filet étiré s'amincit ET se rétrécit latéralement (Trouton), d'où le pincement des coulures.
+ *  - Tension de surface : tension isotrope de la feuille → arrondit les bords, ramasse les filets en gouttes.
+ *  - Incompressibilité (pénalité) : la matière écrasée au sol pousse sur les côtés → la flaque s'étale
+ *    (courant de gravité) et se stabilise quand la tension de surface équilibre la pression.
+ *  - Chaleur : un front de fusion gagne par les bords (le bas d'abord, le haut en dernier, avec des points
+ *    chauds le long du bas) ; viscosité d'Arrhenius μ = μchaud·300^(1−T). Le cœur reste collé au mur
+ *    pendant que le bas s'affaisse et coule : coulures, pincement, puis tout glisse jusqu'à la flaque.
+ * Le pas est surdamped (Stokes, pas d'inertie) et implicite en viscosité : on résout (C + K) v = f par
+ * gradient conjugué. La simulation est déterministe et enregistrée (30 images/s) : le retour arrière
+ * relit simplement l'enregistrement, et à t = 0 le maillage est exactement la grille d'origine.
+ */
+const SIM = {
+  N: 24,            // maillage N×N quadrilatères
+  FPS: 30,          // images enregistrées par seconde (le pas de simulation est adaptatif, ≤ 1/60 s)
+  Q: 1000,          // quantification des positions (Int16)
+  G: 1,             // gravité (unités : hauteur d'icône, seconde)
+  SPEED: 0.42,      // calibre la viscosité : le gros de la matière atteint le sol vers 42 % de la durée
+  VISC_RATIO: 300,  // viscosité plastique froid / fondu (Arrhenius)
+  LAMBDA2: 0.012,   // (longueur de couplage de membrane)² : fixe la largeur typique d'une coulure
+  EXP: 2,           // mobilité ∝ h^EXP (film en lubrification : u = ρ g h² / 3μ)
+  HMIN: 0.2, HCAP: 2.5, // bornes de l'épaisseur dans la mobilité (les filets très fins ne gèlent pas)
+  K: 14,            // incompressibilité près du sol (la flaque s'empile et s'étale au lieu de s'écraser)
+  K_AIR: 14,        // incompressibilité sur le mur (le bas qui gonfle quand le haut s'affaisse)
+  COMP_MAX: 2,      // compression max prise en compte
+  GAMMA: 0.05,      // tension de surface (arrondit bords et gouttes)
+  SQUEEZE: 60, SQUEEZE_H: 1.0, // freinage vertical près du sol (hauteur en icônes)
+  FLOOR_FRICTION: 300, // ligne de contact au sol : la flaque s'étale lentement puis se fige
+  GHOST: 0.35,      // poids des zones transparentes (elles suivent la matière sans la perturber)
+  HEAT_B: 1, HEAT_S: 1.6, HEAT_T: 2.2, HEAT_NOISE: 0.05, // front de chaleur : bas, côtés, haut, irrégularité
+  CG_IT: 10,        // itérations du gradient conjugué (démarré à la vitesse précédente)
+  CFL: 1.2, STRAIN: 1, // limites du pas adaptatif (mailles parcourues, déformation par pas)
+};
+
+function rng(seed) { // mulberry32 : déterministe
+  return () => {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// bruit de valeur 2D lisse (grille G×G)
+function valueNoise(rand, G) {
+  const g = new Float32Array((G + 1) * (G + 1)).map(() => rand() * 2 - 1);
+  return (u, v) => {
+    const x = u * G, y = v * G, i = Math.min(G - 1, Math.floor(x)), j = Math.min(G - 1, Math.floor(y));
+    const fx = sstep(0, 1, x - i), fy = sstep(0, 1, y - j), at = (a, b) => g[b * (G + 1) + a];
+    return (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy) + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
+  };
+}
+
+// topologie partagée : (N+1)² sommets, diagonales alternées (pas de biais d'orientation)
+const TOPO = (() => {
+  const N = SIM.N, n = N + 1, tris = [];
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+    if ((i + j) & 1) tris.push(a, b, d, a, d, c); else tris.push(a, b, c, b, d, c);
+  }
+  return { n, NV: n * n, NT: tris.length / 3, tris: new Uint16Array(tris) };
+})();
+
+// géométrie d'un triangle : aire signée et gradients des fonctions de forme (dans g[0..5])
+function triGeom(P, a, b, c, g) {
+  const x0 = P[2 * a], y0 = P[2 * a + 1], x1 = P[2 * b], y1 = P[2 * b + 1], x2 = P[2 * c], y2 = P[2 * c + 1];
+  const A = 0.5 * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+  return { A, x0, y0, x1, y1, x2, y2 };
+}
+
+function makeSim(p, alphaAt, rand, floorY, aspect) {
+  const { n, NV, NT, tris } = TOPO, N = SIM.N;
+  const pos = new Float64Array(2 * NV), u = new Float32Array(NV), v = new Float32Array(NV);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const k = j * n + i;
+    u[k] = i / N; v[k] = j / N;
+    pos[2 * k] = u[k] * aspect; pos[2 * k + 1] = v[k];
+  }
+  // alpha de l'icône (coins arrondis, zone vide autour de la pastille) et facteur de bord lissé
+  const alpha = new Float32Array(NV);
+  for (let k = 0; k < NV; k++) alpha[k] = alphaAt(u[k], v[k]);
+  let edge = alpha.slice();
+  for (let pass = 0; pass < 2; pass++) {
+    const e2 = new Float32Array(NV);
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const ii = i + di, jj = j + dj;
+        s += ii < 0 || jj < 0 || ii >= n || jj >= n ? 0 : edge[jj * n + ii];
+      }
+      e2[j * n + i] = s / 9;
+    }
+    edge = e2;
+  }
+
+  // coulures : points chauds le long du bas, plus épais (ils coulent plus vite : u ∝ h²)
+  const bumps = [], nb = 3 + Math.floor(rand() * 3);
+  for (let k = 0; k < nb; k++) bumps.push([0.08 + 0.84 * rand(), 0.035 + 0.05 * rand(), 0.5 + 0.5 * rand()]);
+  const hot = (x) => Math.min(1, bumps.reduce((s, [c, w, a]) => s + a * Math.exp(-(((x - c) / w) ** 2)), 0));
+  const nz = valueNoise(rand, 5), nz2 = valueNoise(rand, 3);
+
+  const h0 = new Float32Array(NV), dist = new Float32Array(NV), contact = new Float32Array(NV);
+  for (let k = 0; k < NV; k++) {
+    const hb = hot(u[k]);
+    h0[k] = 1 + 0.18 * nz(u[k], v[k]) + 0.7 * hb * sstep(0.45, 1, v[k]);
+    // distance au front de chaleur : la chaleur gagne par les bords (le bas d'abord, puis les côtés,
+    // le haut en dernier) → le cœur et le haut restent collés au mur pendant que le bas coule
+    const side = Math.min(u[k], 1 - u[k]);
+    let d = Math.min((1 - v[k]) * SIM.HEAT_B, side * SIM.HEAT_S, v[k] * SIM.HEAT_T) + SIM.HEAT_NOISE * (nz2(u[k], v[k]) + 1);
+    d -= 0.15 * hb * v[k] * v[k];
+    dist[k] = Math.max(0, d);
+  }
+  // volumes conservés (pondérés par l'alpha : le vide autour de la pastille ne pèse presque rien)
+  const Vt = new Float64Array(NT), A0 = new Float64Array(NT), Vv = new Float64Array(NV), Aw0 = new Float64Array(NV);
+  const at = new Float32Array(NT);
+  for (let t = 0; t < NT; t++) {
+    const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2];
+    const A = triGeom(pos, a, b, c).A;
+    A0[t] = A;
+    at[t] = (alpha[a] + alpha[b] + alpha[c]) / 3;
+    Vt[t] = Math.abs(A) * (h0[a] + h0[b] + h0[c]) / 3 * Math.max(SIM.GHOST, at[t]);
+    for (const q of [a, b, c]) { Vv[q] += Vt[t] / 3; Aw0[q] += Math.abs(A) / 3; }
+  }
+  // contact avec le mur ∝ poids : les zones transparentes, plus légères ET moins frottantes,
+  // tombent à la même vitesse que la matière voisine (sinon elles traînent ou s'envolent)
+  for (let k = 0; k < NV; k++) contact[k] = Vv[k] / (Aw0[k] * h0[k]);
+  return {
+    pos, vel: new Float64Array(2 * NV), u, v, alpha, edge, h0, dist, contact, Vt, A0, Vv, Aw0, at,
+    floor: floorY, aspect, dur: p.dur, steps: 0, time: 0, dtNext: 1 / 60, rec: [quantize(pos)],
+    // vitesse calibrée sur la hauteur de chute : le gros de la matière arrive au sol vers 60 % de la durée
+    mu: SIM.G * SIM.SPEED * p.dur / Math.max(1.5, floorY),
+    // scratch
+    T: new Float32Array(NV), md: new Float64Array(NV), lmd: new Float64Array(NV), c: new Float64Array(2 * NV), f: new Float64Array(2 * NV),
+    diag: new Float64Array(2 * NV), fixY: new Uint8Array(NV), Aw: new Float64Array(NV),
+    G: new Float64Array(6 * NT), eta: new Float64Array(NT), lam: new Float64Array(NT),
+    r: new Float64Array(2 * NV), z: new Float64Array(2 * NV), d: new Float64Array(2 * NV), Kd: new Float64Array(2 * NV),
+  };
+}
+
+function quantize(pos) {
+  const q = new Int16Array(pos.length);
+  for (let k = 0; k < pos.length; k++) q[k] = Math.max(-32767, Math.min(32767, Math.round(pos[k] * SIM.Q)));
+  return q;
+}
+
+// température 0 (solide) … 1 (fondu) d'un point matériel à l'instant tau
+function heat(s, k, tau) {
+  const x = (tau * 0.34 - s.dist[k]) / 0.16;
+  return x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x);
+}
+
+// produit (C + K)·v : frottement contre le mur + viscosité de membrane (implicite)
+function applyK(s, x, out) {
+  const { tris, NT, NV } = TOPO, G = s.G;
+  for (let k = 0; k < 2 * NV; k++) out[k] = s.c[k] * x[k];
+  for (let t = 0; t < NT; t++) {
+    const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2], o = 6 * t;
+    // gradient de vitesse L = Σ v_a ⊗ ∇N_a
+    const Lxx = x[2 * a] * G[o] + x[2 * b] * G[o + 2] + x[2 * c] * G[o + 4];
+    const Lxy = x[2 * a] * G[o + 1] + x[2 * b] * G[o + 3] + x[2 * c] * G[o + 5];
+    const Lyx = x[2 * a + 1] * G[o] + x[2 * b + 1] * G[o + 2] + x[2 * c + 1] * G[o + 4];
+    const Lyy = x[2 * a + 1] * G[o + 1] + x[2 * b + 1] * G[o + 3] + x[2 * c + 1] * G[o + 5];
+    const e = s.eta[t], tr = Lxx + Lyy, iso = (e + s.lam[t]) * tr;
+    const sxx = e * Lxx + iso, syy = e * Lyy + iso, sxy = e * 0.5 * (Lxy + Lyx);
+    out[2 * a] += sxx * G[o] + sxy * G[o + 1]; out[2 * a + 1] += sxy * G[o] + syy * G[o + 1];
+    out[2 * b] += sxx * G[o + 2] + sxy * G[o + 3]; out[2 * b + 1] += sxy * G[o + 2] + syy * G[o + 3];
+    out[2 * c] += sxx * G[o + 4] + sxy * G[o + 5]; out[2 * c + 1] += sxy * G[o + 4] + syy * G[o + 5];
+  }
+  for (let k = 0; k < NV; k++) if (s.fixY[k]) out[2 * k + 1] = 0;
+}
+
+const LN_VR = Math.log(SIM.VISC_RATIO);
+
+function simStep(s, dt) {
+  const { tris, NT, NV } = TOPO, P = s.pos, G = s.G;
+  const tau = s.time;
+  for (let k = 0; k < NV; k++) {
+    s.T[k] = heat(s, k, tau);
+    s.lmd[k] = LN_VR * (1 - s.T[k]);
+    s.md[k] = s.mu * Math.exp(s.lmd[k]);
+  }
+  s.f.fill(0); s.diag.fill(0); s.Aw.fill(0);
+  for (let t = 0; t < NT; t++) {
+    const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2], o = 6 * t;
+    const g = triGeom(P, a, b, c);
+    const A0 = s.A0[t], sg = Math.sign(A0);
+    // aire signée bornée (un triangle écrasé ne doit pas exploser)
+    const Ac = Math.max(g.A * sg, 0.08 * Math.abs(A0)), As = Ac * sg;
+    const i2 = 1 / (2 * As);
+    G[o] = (g.y1 - g.y2) * i2; G[o + 1] = (g.x2 - g.x1) * i2;
+    G[o + 2] = (g.y2 - g.y0) * i2; G[o + 3] = (g.x0 - g.x2) * i2;
+    G[o + 4] = (g.y0 - g.y1) * i2; G[o + 5] = (g.x1 - g.x0) * i2;
+    const h = s.Vt[t] / Ac, ratio = Math.abs(A0) / Ac;
+    const mu = s.mu * Math.exp((s.lmd[a] + s.lmd[b] + s.lmd[c]) / 3) * SIM.LAMBDA2; // moyenne géométrique
+    const hm = Math.max(h, 0.25 * s.at[t] + 0.02);     // les fantômes (zones transparentes) suivent
+    s.eta[t] = 2 * mu * hm * Ac;
+    const comp = Math.min(SIM.COMP_MAX, Math.max(0, ratio - 1));
+    const yc = (g.y0 + g.y1 + g.y2) / 3, Kt = SIM.K_AIR + (SIM.K - SIM.K_AIR) * sstep(0.8, 0.1, s.floor - yc);
+    s.lam[t] = dt * Kt * h * ratio * Ac * (comp > 0 ? 1 : 0);  // pression linéarisée (Euler implicite)
+    // contrainte isotrope : pression de compression − tension de surface
+    const st = Kt * h * comp - SIM.GAMMA * s.at[t] * Math.sqrt(s.T[a]);
+    // force = st · ∂A/∂p (vraie aire signée : pousse toujours à « dé-retourner » un triangle écrasé)
+    s.f[2 * a] += st * 0.5 * (g.y1 - g.y2) * sg; s.f[2 * a + 1] += st * 0.5 * (g.x2 - g.x1) * sg;
+    s.f[2 * b] += st * 0.5 * (g.y2 - g.y0) * sg; s.f[2 * b + 1] += st * 0.5 * (g.x0 - g.x2) * sg;
+    s.f[2 * c] += st * 0.5 * (g.y0 - g.y1) * sg; s.f[2 * c + 1] += st * 0.5 * (g.x1 - g.x0) * sg;
+    for (let q = 0; q < 3; q++) {
+      const vtx = tris[3 * t + q], gx = G[o + 2 * q], gy = G[o + 2 * q + 1];
+      const e = s.eta[t], L = s.lam[t], g2 = gx * gx + gy * gy;
+      s.diag[2 * vtx] += e * ((g2 + gx * gx) / 2 + gx * gx) + L * gx * gx;
+      s.diag[2 * vtx + 1] += e * ((g2 + gy * gy) / 2 + gy * gy) + L * gy * gy;
+      s.Aw[vtx] += Ac / 3;
+    }
+  }
+  // en fin de fonte, les filets minces restés sur le mur finissent de s'écouler dans la flaque
+  const late = sstep(0.3 * s.dur, 0.65 * s.dur, tau);
+  const hmin = SIM.HMIN + (1 - SIM.HMIN) * late, boost = 1 + 3 * late;
+  for (let k = 0; k < NV; k++) {
+    const h = s.Vv[k] / s.Aw[k];
+    // frottement de lubrification : μ·aire/h (le froid colle au mur)
+    // épaisseur réelle du film (hors pondération des zones transparentes) → vitesse libre ∝ h^EXP / μ
+    // (les zones transparentes n'ont pas d'épaisseur propre : elles suivent à vitesse nominale)
+    let hr = Math.min(Math.max(h / s.contact[k], hmin), SIM.HCAP);
+    hr += (s.h0[k] - hr) * (1 - s.alpha[k]);
+    const bk = 1 + (boost - 1) * sstep(0.3, 1, s.floor - P[2 * k + 1]);   // la flaque, elle, n'accélère pas
+    let cw = s.md[k] * s.contact[k] * s.Aw[k] / (Math.pow(hr, SIM.EXP - 1) * bk) + 1e-7;
+    s.fixY[k] = P[2 * k + 1] >= s.floor - 1e-6 ? 1 : 0;
+    // près du sol, la descente est freinée (écrasement d'un film visqueux : « squeeze flow ») →
+    // la matière s'empile en bourrelet puis s'étale, au lieu d'être laminée d'un coup
+    const gap = Math.max(0, s.floor - P[2 * k + 1]) / SIM.SQUEEZE_H;
+    const sq = gap < 1 ? 1 + SIM.SQUEEZE * (1 - gap) * (1 - gap) : 1;
+    s.c[2 * k] = cw * (s.fixY[k] ? SIM.FLOOR_FRICTION : 1); s.c[2 * k + 1] = cw * sq;
+    s.f[2 * k + 1] += s.Vv[k] * SIM.G;
+    s.diag[2 * k] += s.c[2 * k]; s.diag[2 * k + 1] += s.c[2 * k + 1];
+    if (s.fixY[k]) { s.f[2 * k + 1] = Math.min(0, s.f[2 * k + 1]); }
+  }
+  // gradient conjugué préconditionné (Jacobi), démarré à la vitesse précédente
+  const x = s.vel, r = s.r, z = s.z, d = s.d, Kd = s.Kd, M = 2 * NV;
+  for (let k = 0; k < NV; k++) if (s.fixY[k]) x[2 * k + 1] = 0;
+  applyK(s, x, Kd);
+  let rz = 0;
+  for (let k = 0; k < M; k++) {
+    r[k] = s.f[k] - Kd[k];
+    if ((k & 1) && s.fixY[k >> 1]) r[k] = 0;
+    z[k] = r[k] / s.diag[k]; d[k] = z[k]; rz += r[k] * z[k];
+  }
+  for (let it = 0; it < SIM.CG_IT && rz > 1e-24; it++) {
+    applyK(s, d, Kd);
+    let dKd = 0;
+    for (let k = 0; k < M; k++) dKd += d[k] * Kd[k];
+    if (dKd <= 0) break;
+    const al = rz / dKd;
+    let rz2 = 0;
+    for (let k = 0; k < M; k++) { x[k] += al * d[k]; r[k] -= al * Kd[k]; z[k] = r[k] / s.diag[k]; rz2 += r[k] * z[k]; }
+    const be = rz2 / rz; rz = rz2;
+    for (let k = 0; k < M; k++) d[k] = z[k] + be * d[k];
+  }
+  // intégration + sol (garde-fou : vitesse bornée par la chute libre la plus rapide possible)
+  let vmax = 1e-6;
+  const vlim = 7 * SIM.G / s.mu;
+  for (let k = 0; k < NV; k++) {
+    const vv = Math.hypot(x[2 * k], x[2 * k + 1]);
+    if (!Number.isFinite(vv)) { x[2 * k] = 0; x[2 * k + 1] = 0; }
+    else if (vv > vlim) { x[2 * k] *= vlim / vv; x[2 * k + 1] *= vlim / vv; }
+    vmax = Math.max(vmax, Math.abs(x[2 * k]), Math.abs(x[2 * k + 1]));
+    P[2 * k] += x[2 * k] * dt;
+    P[2 * k + 1] += x[2 * k + 1] * dt;
+    if (P[2 * k + 1] > s.floor) { P[2 * k + 1] = s.floor; if (x[2 * k + 1] > 0) x[2 * k + 1] = 0; }
+  }
+  // taux de déformation max (la translation d'ensemble, elle, ne limite pas le pas)
+  let lmax = 1e-6;
+  for (let t = 0; t < NT; t++) {
+    const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2], o = 6 * t;
+    const Lxx = x[2 * a] * G[o] + x[2 * b] * G[o + 2] + x[2 * c] * G[o + 4];
+    const Lxy = x[2 * a] * G[o + 1] + x[2 * b] * G[o + 3] + x[2 * c] * G[o + 5];
+    const Lyx = x[2 * a + 1] * G[o] + x[2 * b + 1] * G[o + 2] + x[2 * c + 1] * G[o + 4];
+    const Lyy = x[2 * a + 1] * G[o + 1] + x[2 * b + 1] * G[o + 3] + x[2 * c + 1] * G[o + 5];
+    lmax = Math.max(lmax, Math.abs(Lxx) + Math.abs(Lxy) + Math.abs(Lyx) + Math.abs(Lyy));
+  }
+  s.steps++; s.time += dt;
+  // pas suivant : déformation ≤ 15 % par pas, déplacement ≤ 1 maille (le sol écrase sinon les rangées)
+  s.dtNext = Math.max(1 / 1000, Math.min(1 / 60, SIM.CFL / (SIM.N * vmax), SIM.STRAIN / lmax));
+}
+
+// avance la simulation d'une pièce jusqu'à l'image enregistrée `frame`
+function simulateTo(p, frame) {
+  const s = p.sim, last = p.frames;
+  frame = Math.min(frame, last);
+  while (s.rec.length <= frame) {
+    const target = s.rec.length / SIM.FPS;
+    while (s.time < target - 1e-9) simStep(s, Math.min(s.dtNext, target - s.time));
+    s.time = target;
+    s.rec.push(quantize(s.pos));
+  }
+}
+
+// calcul en tâche de fond (dès la détection), par tranches de quelques ms : on avance toujours
+// la pièce dont l'image manquante sera montrée le plus tôt, pour rester en avance sur l'animation
+function backgroundSim() {
+  const t0 = performance.now();
+  while (performance.now() - t0 < 4) {
+    let next = null, best = Infinity;
+    for (const p of pieces) {
+      const n = p.sim.rec.length;
+      if (n <= p.frames && p.delay + n / SIM.FPS < best) { best = p.delay + n / SIM.FPS; next = p; }
+    }
+    if (!next) { bgId = 0; return; }
+    simulateTo(next, next.sim.rec.length);
+  }
+  bgId = setTimeout(backgroundSim, 6);
+}
+
+function runDetection() {
+  if (!currentImage) return;
+  cancelAnimationFrame(rafId);
+  clearTimeout(bgId);
+  const icons = detectIcons(currentImage);
+  stage.querySelectorAll('.icon-box').forEach((el) => el.remove());
+  stage.classList.remove('blurred');
+  canvas.style.display = 'none';
+  state = 'idle'; clock = 0;
+  const pct = (el, b) => Object.assign(el.style, {
+    left: b.x * 100 + '%', top: b.y * 100 + '%', width: b.w * 100 + '%', height: b.h * 100 + '%',
+  });
+
+  // zones floutées (visibles quand l'icône a fondu)
+  for (const b of icons) {
+    const el = document.createElement('div');
+    el.className = b.badge ? 'icon-box badge' : 'icon-box';
+    pct(el, b);
+    stage.appendChild(el);
+  }
+
+  // une texture par pièce : l'icône (coins arrondis) + sa pastille, découpées dans l'image d'origine
+  const nw = currentImage.naturalWidth, nh = currentImage.naturalHeight;
+  if (gl) pieces.forEach((p) => gl.deleteTexture(p.tex));
+  pieces = [];
+  if (!initGL()) return;
+  let delay = 0;
+  const order = icons.map((b, i) => i).filter((i) => !icons[i].badge).sort(() => Math.random() - 0.5);
+  for (const i of order) {
+    const cut = icons[i].cut;
+    const parts = [{ c: cut, badge: false }, ...icons.filter((k) => k.badge && k.of === i).map((k) => ({ c: k.cut, badge: true }))];
+    const x0 = Math.min(...parts.map((q) => q.c.x)), y0 = Math.min(...parts.map((q) => q.c.y));
+    const x1 = Math.max(...parts.map((q) => q.c.x + q.c.w)), y1 = Math.max(...parts.map((q) => q.c.y + q.c.h));
+    const b = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(b.w * nw)); cv.height = Math.max(1, Math.round(b.h * nh));
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    for (const q of parts) {
+      const x = (q.c.x - x0) * nw, y = (q.c.y - y0) * nh, w = q.c.w * nw, h = q.c.h * nh;
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, q.badge ? Math.min(w, h) / 2 : 0.225 * Math.min(w, h));
+      ctx.clip();
+      ctx.drawImage(currentImage, q.c.x * nw, q.c.y * nh, w, h, x, y, w, h);
+      ctx.restore();
+    }
+    const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    const alphaAt = (u, v) => {
+      const px = Math.min(cv.width - 1, Math.max(0, Math.round(u * cv.width - 0.5)));
+      const py = Math.min(cv.height - 1, Math.max(0, Math.round(v * cv.height - 0.5)));
+      return data[(py * cv.width + px) * 4 + 3] / 255;
+    };
+    delay += 0.06 + Math.random() * 0.22;
+    const floorY = (1 - b.y) / b.h;                       // sol (bas de l'image), en hauteurs d'icône
+    const aspect = (b.w * nw) / (b.h * nh);               // largeur / hauteur réelles de la pièce
+    const p = { b, tex: makeTexture(cv), delay, dur: 3.6 + 0.07 * floorY + Math.random() * 1.2 };
+    p.frames = Math.ceil(p.dur * SIM.FPS);
+    p.dur = p.frames / SIM.FPS;
+    p.sim = makeSim(p, alphaAt, rng((Math.random() * 2 ** 31) | 0), floorY, aspect);
+    pieces.push(p);
+  }
+  bgId = setTimeout(backgroundSim, 50);
+}
+
+/* ---------- WebGL : chaque icône est un maillage déformé par la simulation ---------- */
+
+const VS = `
+attribute vec2 aPos;     // position en px CSS
+attribute vec2 aUV;
+attribute vec2 aGrad;    // pente de la surface du plastique (dz/dx, dz/dy)
+attribute vec2 aInfo;    // épaisseur relative h/h0, fusion 0..1
+uniform vec2 uRes;
+varying vec2 vUV;
+varying vec2 vGrad;
+varying vec2 vInfo;
+void main() {
+  vUV = aUV; vGrad = aGrad; vInfo = aInfo;
+  vec2 clip = aPos / uRes * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+}`;
+
+const FS = `
+precision mediump float;
+uniform sampler2D uTex;
+varying vec2 vUV;
+varying vec2 vGrad;
+varying vec2 vInfo;
+void main() {
+  vec4 c = texture2D(uTex, vUV);          // prémultiplié
+  float m = vInfo.y;                      // 0 : icône intacte (rendu identique à la capture)
+  float thin = vInfo.x;
+  // normale de la surface (y vers le bas, z vers l'observateur)
+  vec3 n = normalize(vec3(-vGrad, 1.0));
+  vec3 L = normalize(vec3(-0.45, -0.75, 0.9));
+  vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+  float diff = 1.0 + 0.35 * (dot(n, L) - L.z);
+  float nh = max(dot(n, H), 0.0);
+  float spec = pow(nh, 90.0) * 0.6 + pow(nh, 14.0) * 0.06;     // reflet net + lustre large
+  float fres = pow(1.0 - n.z, 3.0) * 0.12;                       // reflet rasant sur les bords bombés
+  // plastique fondu : un peu plus saturé, plus sombre et translucide là où il s'étire
+  vec3 rgb = c.rgb;
+  float l = dot(rgb, vec3(0.299, 0.587, 0.114));
+  rgb = mix(vec3(l), rgb, 1.0 + 0.2 * m);
+  float shade = clamp(diff, 0.72, 1.15) * mix(0.8, 1.0, smoothstep(0.08, 0.7, thin));
+  rgb *= mix(1.0, shade, m);
+  float a = c.a * mix(1.0, mix(0.72, 1.0, smoothstep(0.04, 0.35, thin)) * smoothstep(0.004, 0.03, thin), m);
+  rgb *= a / max(c.a, 1e-3);
+  rgb += a * m * (spec + fres);
+  gl_FragColor = vec4(clamp(rgb, 0.0, a), a);
+}`;
+
+function initGL() {
+  if (gl) return true;
+  gl = canvas.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: true });
+  if (!gl) { console.warn('WebGL indisponible'); return false; }
+  const sh = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  prog.u = {};
+  for (const n of ['uRes', 'uTex']) prog.u[n] = gl.getUniformLocation(prog, n);
+
+  // coordonnées de texture (fixes) + données dynamiques (position, pente, épaisseur, fusion)
+  const { n, NV, tris } = TOPO, uv = new Float32Array(2 * NV);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) { uv[2 * (j * n + i)] = i / SIM.N; uv[2 * (j * n + i) + 1] = j / SIM.N; }
+  const uvb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, uvb);
+  gl.bufferData(gl.ARRAY_BUFFER, uv, gl.STATIC_DRAW);
+  const lUV = gl.getAttribLocation(prog, 'aUV');
+  gl.enableVertexAttribArray(lUV); gl.vertexAttribPointer(lUV, 2, gl.FLOAT, false, 0, 0);
+  const db = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, db);
+  gl.bufferData(gl.ARRAY_BUFFER, 6 * 4 * NV, gl.DYNAMIC_DRAW);
+  [['aPos', 0], ['aGrad', 2], ['aInfo', 4]].forEach(([name, off]) => {
+    const l = gl.getAttribLocation(prog, name);
+    gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 24, off * 4);
+  });
+  const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, tris, gl.STATIC_DRAW);
+  mesh = { count: tris.length, data: new Float32Array(6 * NV), pos: new Float64Array(2 * NV),
+    Aw: new Float64Array(NV), gz: new Float64Array(2 * NV), z: new Float64Array(NV), area: new Float64Array(TOPO.NT) };
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  return true;
+}
+
+function makeTexture(cv) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+// remplit mesh.data pour la pièce p à l'instant tau (s) ; renvoie false si l'icône est intacte
+function pieceGeometry(p, tau, W, H) {
+  const { n, NV, NT, tris } = TOPO, s = p.sim, P = mesh.pos, D = mesh.data;
+  // position : interpolation entre deux images enregistrées
+  const f = tau * SIM.FPS, k0 = Math.floor(f), k1 = Math.min(p.frames, k0 + 1), w = f - k0;
+  simulateTo(p, k1);
+  const A = s.rec[Math.min(k0, p.frames)], B = s.rec[k1], iq = 1 / SIM.Q;
+  for (let k = 0; k < 2 * NV; k++) P[k] = (A[k] * (1 - w) + B[k] * w) * iq;
+  if (tau <= 0) for (let k = 0; k < NV; k++) { P[2 * k] = s.u[k] * s.aspect; P[2 * k + 1] = s.v[k]; }
+  // épaisseur (masse conservée) et pente de la surface du plastique
+  const Aw = mesh.Aw, gz = mesh.gz, z = mesh.z;
+  Aw.fill(0); gz.fill(0);
+  const area = mesh.area;
+  for (let t = 0; t < NT; t++) {
+    const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2];
+    const At = Math.max(triGeom(P, a, b, c).A * Math.sign(s.A0[t]), 0.08 * Math.abs(s.A0[t]));
+    area[t] = At;
+    Aw[a] += At / 3; Aw[b] += At / 3; Aw[c] += At / 3;
+  }
+  for (let k = 0; k < NV; k++) {
+    const h = s.Vv[k] / Aw[k];
+    // hauteur du relief : épaisseur × ménisque (bord arrondi), exagérée pour la lisibilité
+    z[k] = 0.08 * Math.sqrt(Math.min(h, 2.5)) * Math.sqrt(sstep(0, 0.75, s.edge[k]));
+  }
+  for (let t = 0; t < NT; t++) {
+    const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2];
+    const g = triGeom(P, a, b, c), i2 = 1 / (2 * area[t] * Math.sign(s.A0[t]));
+    const gx = ((g.y1 - g.y2) * z[a] + (g.y2 - g.y0) * z[b] + (g.y0 - g.y1) * z[c]) * i2;
+    const gy = ((g.x2 - g.x1) * z[a] + (g.x0 - g.x2) * z[b] + (g.x1 - g.x0) * z[c]) * i2;
+    for (const q of [a, b, c]) { gz[2 * q] += gx * area[t]; gz[2 * q + 1] += gy * area[t]; }
+  }
+  const bx = p.b.x * W, by = p.b.y * H, sx = p.b.w * W / s.aspect, sy = p.b.h * H;
+  for (let k = 0; k < NV; k++) {
+    const o = 6 * k, wA = 3 * Aw[k];
+    D[o] = bx + P[2 * k] * sx;
+    D[o + 1] = by + P[2 * k + 1] * sy;
+    const gx = gz[2 * k] / wA, gy = gz[2 * k + 1] / wA, gl2 = Math.hypot(gx, gy), lim = 2.5;
+    D[o + 2] = gl2 > lim ? gx * lim / gl2 : gx;
+    D[o + 3] = gl2 > lim ? gy * lim / gl2 : gy;
+    D[o + 4] = s.Aw0[k] / Aw[k];       // h / h0 (étirement)
+    D[o + 5] = heat(s, k, tau);
+  }
+}
+
+function render() {
+  const W = stage.clientWidth, H = stage.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  }
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.uniform2f(prog.u.uRes, W, H);
+  gl.uniform1i(prog.u.uTex, 0);
+  for (const p of pieces) {
+    const tau = Math.max(0, Math.min(p.dur, clock - p.delay));
+    pieceGeometry(p, tau, W, H);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.data);
+    gl.bindTexture(gl.TEXTURE_2D, p.tex);
+    gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0);
+  }
+}
+
+function tick(now) {
+  const dt = Math.min(0.05, (now - lastNow) / 1000); lastNow = now;
+  // le retour rembobine la fonte (relecture de l'enregistrement), 3× plus vite
+  clock += dt * (dir > 0 ? 1 : -3);
+  const end = Math.max(...pieces.map((p) => p.delay + p.dur));
+  if (dir < 0 && clock <= 0) {
+    clock = 0; render();
+    canvas.style.display = 'none';
+    stage.classList.remove('blurred');
+    state = 'idle';
+    return;
+  }
+  clock = Math.min(clock, end);
+  // pas de rendu inutile une fois la flaque figée (sauf redimensionnement)
+  const key = [clock, stage.clientWidth, stage.clientHeight, window.devicePixelRatio].join();
+  if (key !== lastKey) { lastKey = key; render(); }
+  rafId = requestAnimationFrame(tick);
+}
+
+// Toucher l'écran → les icônes fondent / se reforment (on peut inverser en cours de route)
+viewer.addEventListener('click', () => {
+  if (!pieces.length || !gl) return;
+  if (state === 'idle') {
+    state = 'melting'; dir = 1; clock = 0; lastKey = '';
+    canvas.style.display = 'block';
+    stage.classList.add('blurred');
+    lastNow = performance.now();
+    cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(tick);
+  } else if (state === 'melting') { state = 'returning'; dir = -1; }
+  else if (state === 'returning') { state = 'melting'; dir = 1; }
+});
+
+</script>
+</body>
+</html>
