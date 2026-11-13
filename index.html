@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -14,7 +14,7 @@
   }
   body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
 
-  /* Écran d'accueil */
+  /* Home screen */
   #home { display: flex; flex-direction: column; align-items: center; gap: 16px; text-align: center; padding: 24px; }
   #pasteBtn {
     font-size: 22px; font-weight: 600; padding: 18px 48px;
@@ -27,7 +27,7 @@
   #hint { opacity: .6; font-size: 14px; max-width: 360px; }
   #error { color: #ff7b7b; font-size: 14px; min-height: 1em; }
 
-  /* Vue image */
+  /* Image view */
   #viewer { display: none; position: fixed; inset: 0; align-items: center; justify-content: center; cursor: pointer; }
   #stage { position: relative; line-height: 0; }
   #stage img { max-width: 100vw; max-height: 100vh; display: block; user-select: none; -webkit-user-drag: none; }
@@ -49,8 +49,8 @@
 <body>
 
 <div id="home">
-  <button id="pasteBtn">📋 Coller</button>
-  <div id="hint">Copie une capture d'écran, puis clique sur « Coller » (ou fais Ctrl/⌘ + V).</div>
+  <button id="pasteBtn">📋 Paste</button>
+  <div id="hint">Copy a screenshot, then click “Paste” (or press Ctrl/⌘ + V).</div>
   <div id="error"></div>
 </div>
 
@@ -62,9 +62,9 @@
 const $ = (id) => document.getElementById(id);
 const home = $('home'), viewer = $('viewer'), stage = $('stage'), img = $('img');
 
-let currentImage = null; // HTMLImageElement chargée
+let currentImage = null; // loaded HTMLImageElement
 
-/* ---------- Récupération du presse-papier ---------- */
+/* ---------- Reading the clipboard ---------- */
 
 $('pasteBtn').addEventListener('click', async () => {
   $('error').textContent = '';
@@ -75,15 +75,15 @@ $('pasteBtn').addEventListener('click', async () => {
       const type = item.types.find((t) => t.startsWith('image/'));
       if (type) return loadFromBlob(await item.getType(type));
     }
-    $('error').textContent = "Aucune image dans le presse-papier.";
+    $('error').textContent = "No image in the clipboard.";
   } catch (e) {
     $('error').textContent = e.message === 'unsupported'
-      ? "Ton navigateur ne permet pas la lecture directe : utilise Ctrl/⌘ + V."
-      : "Accès au presse-papier refusé. Essaie Ctrl/⌘ + V.";
+      ? "Your browser doesn't support reading the clipboard directly: use Ctrl/⌘ + V."
+      : "Clipboard access denied. Try Ctrl/⌘ + V.";
   }
 });
 
-// Fallback : Ctrl/⌘ + V n'importe quand
+// Fallback: Ctrl/⌘ + V at any time
 window.addEventListener('paste', (e) => {
   const file = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'))?.getAsFile();
   if (file) { e.preventDefault(); loadFromBlob(file); }
@@ -100,16 +100,16 @@ function loadFromBlob(blob) {
     stage.classList.remove('blurred');
     runDetection();
   };
-  im.onerror = () => { $('error').textContent = "Impossible de lire l'image."; };
+  im.onerror = () => { $('error').textContent = "Unable to read the image."; };
   im.src = url;
 }
 window.loadFromBlob = loadFromBlob;
 
-/* ---------- Détection des icônes ---------- */
+/* ---------- Icon detection ---------- */
 
-// Principe : une passe grossière sur une image réduite trouve les icônes (grille d'écran d'accueil,
-// sinon analyse générique), puis chaque bord est mesuré en pleine résolution et, en mode grille,
-// toutes les icônes sont recalées sur une taille commune et des rangées / colonnes partagées.
+// Approach: a coarse pass on a downscaled image finds the icons (home-screen grid,
+// otherwise generic analysis), then each edge is measured at full resolution and, in grid mode,
+// all icons are snapped to a common size and to shared rows / columns.
 function detectIcons(image) {
   const nw = image.naturalWidth, nh = image.naturalHeight;
   const grab = (w, h) => {
@@ -120,14 +120,14 @@ function detectIcons(image) {
     return ctx.getImageData(0, 0, w, h).data;
   };
 
-  // 1. Réduction pour l'analyse grossière
+  // 1. Downscale for the coarse analysis
   const MAX = 1000;
   const scale = Math.min(1, MAX / Math.max(nw, nh));
   const W = Math.max(1, Math.round(nw * scale));
   const H = Math.max(1, Math.round(nh * scale));
   const px = grab(W, H);
 
-  // 2. Force des contours (gradient couleur)
+  // 2. Edge strength (color gradient)
   const grad = new Uint16Array(W * H);
   for (let y = 0; y < H - 1; y++) {
     for (let x = 0; x < W - 1; x++) {
@@ -140,38 +140,38 @@ function detectIcons(image) {
     }
   }
 
-  // 3. Écran d'accueil ? On cherche une grille régulière d'icônes de même taille
-  //    (bien plus fiable sur un fond d'écran photo). Sinon : analyse générique.
+  // 3. Home screen? Look for a regular grid of same-size icons
+  //    (much more reliable on a photo wallpaper). Otherwise: generic analysis.
   const squares = findSquares(px, grad, W, H);
   const grid = detectGrid(px, grad, W, H, squares);
-  // hors grille : composantes connexes + carrés sûrs (qui retrouvent les icônes collées à leur texte)
+  // off-grid: connected components + confident squares (which recover icons stuck to their label)
   const coarse = grid || detectLoose(px, grad, W, H).concat(squares.filter((q) => q.score >= 0.8));
 
-  // 4. Mesure fine en pleine résolution (plafonnée pour les très grandes images)
+  // 4. Fine measurement at full resolution (capped for very large images)
   const fs = Math.min(1, 3000 / Math.max(nw, nh));
   const FW = Math.max(1, Math.round(nw * fs)), FH = Math.max(1, Math.round(nh * fs));
   const fpx = scale === fs ? px : grab(FW, FH);
   const kx = FW / W, ky = FH / H;
   let approx = coarse.map((b) => ({ x: b.x * kx, y: b.y * ky, w: b.w * kx, h: b.h * ky, weak: b.weak, group: b.group }));
-  // (hors grille, la boîte grossière est moins sûre : on cherche le bord plus loin)
+  // (off-grid, the coarse box is less reliable: search for the edge further out)
   let meas = approx.map((b) => measureEdges(fpx, FW, FH, b, grid ? 0.1 : 0.2, !!grid));
   if (grid) {
-    // chaque case doit montrer de vrais bords droits, à la bonne place, en pleine résolution :
-    // au moins 2 pour une case sûre, 3 pour une case douteuse (sinon : case vide, widget, motif du fond…)
+    // each cell must show real straight edges, in the right place, at full resolution:
+    // at least 2 for a confident cell, 3 for a doubtful one (otherwise: empty cell, widget, wallpaper pattern…)
     const keep = approx.map((b, i) => confirmCell(b, meas[i], b.weak ? 3 : 2));
     approx = approx.filter((b, i) => keep[i]);
     meas = meas.filter((m, i) => keep[i]);
   }
   const tight = grid ? alignGrid(approx, meas) : looseBoxes(approx, meas, fpx, FW, FH);
 
-  // 5. Sorties en coordonnées relatives (0..1) :
-  //    cut = au ras de l'icône (elle n'emporte pas de fond d'écran en tombant),
-  //    box = zone floutée, avec une petite marge (liseré des dossiers, anticrénelage).
+  // 5. Outputs in relative coordinates (0..1):
+  //    cut = flush with the icon (it doesn't take wallpaper with it when falling),
+  //    box = blurred area, with a small margin (folder rim, anti-aliasing).
   const rel = (b) => ({ x: b.x / FW, y: b.y / FH, w: b.w / FW, h: b.h / FH });
   const grow = (b, m) => ({ x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m });
   const out = tight.map((b) => ({ ...rel(grow(b, 0.025 * b.w + 2)), cut: rel(b) }));
 
-  // 6. Pastilles de notification (rouges, en haut à droite de l'icône)
+  // 6. Notification badges (red, top right of the icon)
   tight.forEach((b, i) => {
     const badge = findBadge(fpx, FW, FH, b);
     if (badge) out.push({ ...rel(grow(badge, 0.04 * badge.h + 1)), cut: rel(badge), badge: true, of: i });
@@ -179,10 +179,10 @@ function detectIcons(image) {
   return out;
 }
 
-// Analyse générique (captures hors écran d'accueil) : composantes connexes des contours,
-// multi-seuils (icônes peu contrastées) et multi-échelles :
-//   petite dilatation = garde l'icône séparée de son texte,
-//   grande dilatation = réunit les morceaux d'une icône "en traits".
+// Generic analysis (screenshots other than the home screen): connected components of edges,
+// multi-threshold (low-contrast icons) and multi-scale:
+//   small dilation = keeps the icon separate from its label,
+//   large dilation = joins the pieces of a line-art icon.
 function detectLoose(px, grad, W, H) {
   const N = W * H, minDim = Math.min(W, H);
   const color = new Uint8Array(N);
@@ -198,12 +198,12 @@ function detectLoose(px, grad, W, H) {
     return S[y1 * w1 + x1] - S[y0 * w1 + x1] - S[y1 * w1 + x0] + S[y0 * w1 + x0];
   };
 
-  const minSide = Math.max(8, minDim * 0.045); // plus petit : du texte, pas une icône
+  const minSide = Math.max(8, minDim * 0.045); // smaller: text, not an icon
   const maxSide = minDim * 0.45;
   const isIconShape = (b) =>
     b.w >= minSide && b.h >= minSide && b.w <= maxSide && b.h <= maxSide &&
     b.w / b.h >= 0.8 && b.w / b.h <= 1.25 &&
-    b.x > 1 && b.y > 1 && b.x + b.w < W - 1 && b.y + b.h < H - 1; // coupée par le bord de l'image : on ignore
+    b.x > 1 && b.y > 1 && b.x + b.w < W - 1 && b.y + b.h < H - 1; // cut by the image border: ignore
 
   const unit = Math.max(1, minDim / 500);
   const radii = [...new Set([1, 2, 3, 5, 8].map((r) => Math.max(1, Math.round(r * unit))))];
@@ -221,29 +221,29 @@ function detectLoose(px, grad, W, H) {
         if (!isIconShape(b)) continue;
         const area = b.w * b.h;
         const edges = sumIn(edgeSum, b);
-        if (edges < (b.w + b.h) * 0.9) continue;          // trop vide
-        if (edges > area * 0.55) continue;                 // texture / bruit
+        if (edges < (b.w + b.h) * 0.9) continue;          // too empty
+        if (edges > area * 0.55) continue;                 // texture / noise
         const colorful = sumIn(colorSum, b) / area;
-        // Rejet du texte : une lettre a des voisines de même hauteur, alignées et très proches.
+        // Text rejection: a letter has neighbors of the same height, aligned and very close.
         if (colorful < 0.15 && looksLikeText(b, boxes)) continue;
         candidates.push(b);
       }
     }
   }
 
-  // Fusion des candidats des différentes échelles
-  const squareness = (b) => Math.min(b.w, b.h) / Math.max(b.w, b.h); // 1 = carré parfait
+  // Merge candidates from the different scales
+  const squareness = (b) => Math.min(b.w, b.h) / Math.max(b.w, b.h); // 1 = perfect square
   candidates.sort((a, b) => a.w * a.h - b.w * b.h);
   const kept = [];
   for (const c of candidates) {
     const dupe = kept.findIndex((k) => iou(c, k) > 0.6);
     if (dupe === -1) kept.push(c);
-    else if (squareness(c) > squareness(kept[dupe]) + 0.03) kept[dupe] = c; // on garde la plus carrée
+    else if (squareness(c) > squareness(kept[dupe]) + 0.03) kept[dupe] = c; // keep the squarest
   }
-  // Grandes boîtes d'abord :
-  //  - englobe plusieurs icônes → groupe fusionné… ou dossier : mis de côté, la mesure fine tranchera ;
-  //  - englobe une seule boîte presque aussi grande mais plus carrée (icône + texte) → on jette l'englobante ;
-  //  - sinon c'est une icône, et ce qu'elle contient (son dessin intérieur) est ignoré.
+  // Large boxes first:
+  //  - contains several icons → merged group… or folder: set aside, fine measurement will decide;
+  //  - contains a single box almost as large but squarer (icon + label) → drop the enclosing one;
+  //  - otherwise it's an icon, and what it contains (its inner artwork) is ignored.
   kept.sort((a, b) => b.w * b.h - a.w * a.h);
   const final = [], groups = [];
   for (const c of kept) {
@@ -259,15 +259,15 @@ function detectLoose(px, grad, W, H) {
   return final.concat(groups);
 }
 
-/* ---------- Mesure fine des bords (pleine résolution) ---------- */
+/* ---------- Fine edge measurement (full resolution) ---------- */
 
-// Pour chaque côté, on balaie des lignes perpendiculaires au bord, prises dans la partie droite
-// du côté (les coins d'une icône iOS sont des « squircles » qui s'arrondissent sur ~1/3 du côté).
-// Le vrai bord est une ligne droite : le saut de couleur s'y retrouve au même endroit sur
-// presque toutes les lignes, contrairement au dessin intérieur ou au fond d'écran.
-// reach : demi-largeur de la zone de recherche autour du bord estimé (en fraction de la taille) ;
-// outer : prendre le pic fort le plus à l'extérieur (sinon le plus fort, si la zone est large).
-// Renvoie pour chaque côté { p: position du bord (coordonnée continue), ok: mesure fiable }.
+// For each side, scan lines perpendicular to the edge, taken from the straight part
+// of the side (iOS icon corners are "squircles" that curve over ~1/3 of the side).
+// The real edge is a straight line: the color jump sits at the same spot on
+// almost every line, unlike the inner artwork or the wallpaper.
+// reach: half-width of the search zone around the estimated edge (as a fraction of the size);
+// outer: take the outermost strong peak (otherwise the strongest, if the zone is wide).
+// Returns for each side { p: edge position (continuous coordinate), ok: reliable measurement }.
 function measureEdges(px, W, H, b, reach = 0.1, outer = true) {
   const s = (b.w + b.h) / 2, win = Math.max(3, Math.round(reach * s)), n = 24;
   const at = (x, y) => {
@@ -283,12 +283,12 @@ function measureEdges(px, W, H, b, reach = 0.1, outer = true) {
     for (let k = 0; k < n; k++) {
       const u = Math.round(horiz ? b.y + b.h * (0.38 + 0.24 * k / (n - 1)) : b.x + b.w * (0.38 + 0.24 * k / (n - 1)));
       for (let j = 0; j < len; j++) {
-        const t = lo + j; // bord entre les pixels t-1 et t
+        const t = lo + j; // edge between pixels t-1 and t
         const i = horiz ? at(t - 1, u) : at(u, t - 1), q = horiz ? at(t, u) : at(u, t);
         g[k * len + j] = Math.abs(px[i] - px[q]) + Math.abs(px[i + 1] - px[q + 1]) + Math.abs(px[i + 2] - px[q + 2]);
       }
     }
-    // cohérence : valeur dépassée par ~70 % des lignes (un dessin intérieur ne couvre pas toutes les lignes)
+    // consistency: value exceeded by ~70% of lines (inner artwork doesn't cover every line)
     const A = new Float32Array(len), col = new Float32Array(n);
     for (let j = 0; j < len; j++) {
       for (let k = 0; k < n; k++) col[k] = g[k * len + j];
@@ -297,7 +297,7 @@ function measureEdges(px, W, H, b, reach = 0.1, outer = true) {
     }
     let max = 0;
     for (let j = 0; j < len; j++) max = Math.max(max, A[j]);
-    // pic le plus à l'extérieur parmi les pics forts (le contour de l'icône, pas son dessin)
+    // outermost peak among the strong peaks (the icon outline, not its artwork)
     const outward = side === 'L' || side === 'T';
     let pk = -1;
     for (let jj = 0; jj < len; jj++) {
@@ -305,14 +305,14 @@ function measureEdges(px, W, H, b, reach = 0.1, outer = true) {
       const prev = j > 0 ? A[j - 1] : -1, next = j < len - 1 ? A[j + 1] : -1;
       if (A[j] >= (outer ? 0.5 : 1) * max && A[j] >= prev && A[j] >= next) { pk = j; break; }
     }
-    // précision sous-pixel (parabole sur le pic)
+    // sub-pixel precision (parabola fit on the peak)
     let off = 0;
     if (pk > 0 && pk < len - 1) {
       const a = A[pk - 1], c = A[pk + 1], d = a - 2 * A[pk] + c;
       if (d < 0) off = Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / d));
     }
     const sorted = [...A].sort((x, y) => x - y), med = sorted[len >> 1];
-    // fiable si le saut est net, cohérent, et ressort nettement du reste de la fenêtre
+    // reliable if the jump is sharp, consistent, and stands out clearly from the rest of the window
     const ok = pk >= 0 && max >= 18 && max >= 2.2 * med + 6;
     res[side] = { p: lo + pk + off, ok, v: max };
   }
@@ -320,7 +320,7 @@ function measureEdges(px, W, H, b, reach = 0.1, outer = true) {
 }
 
 function confirmCell(b, m, need) {
-  // bords nets trouvés près de leur place attendue (la taille grossière peut être un peu fausse)
+  // sharp edges found near their expected place (the coarse size may be slightly off)
   const ref = { L: b.x, R: b.x + b.w, T: b.y, B: b.y + b.h };
   return ['L', 'R', 'T', 'B'].filter((k) => m[k].ok && Math.abs(m[k].p - ref[k]) <= 0.1 * b.w).length >= need;
 }
@@ -331,8 +331,8 @@ const median = (arr) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-// Centre et taille mesurés d'une icône sur un axe ; repli sur la boîte grossière si un bord manque.
-// (deux bords qui ne sont pas à la bonne distance l'un de l'autre : mesure incohérente, ignorée)
+// Measured center and size of an icon on one axis; falls back to the coarse box if an edge is missing.
+// (two edges not at the right distance from each other: inconsistent measurement, ignored)
 function axisFit(m, a, b, c0, S) {
   if (m[a].ok && m[b].ok) {
     if (Math.abs(m[b].p - m[a].p - S) <= 0.04 * S) return { c: (m[a].p + m[b].p) / 2, ok: 2 };
@@ -343,8 +343,8 @@ function axisFit(m, a, b, c0, S) {
   return { c: c0, ok: 0 };
 }
 
-// Mode grille : taille commune, rangées partagées, colonnes partagées par bloc
-// (le dock forme son propre bloc : ses colonnes ne tombent pas forcément sur celles de la grille).
+// Grid mode: common size, shared rows, shared columns per block
+// (the dock forms its own block: its columns don't necessarily line up with the grid's).
 function alignGrid(approx, meas) {
   const sizes = [];
   meas.forEach((m) => {
@@ -352,14 +352,14 @@ function alignGrid(approx, meas) {
     if (m.T.ok && m.B.ok) sizes.push(m.B.p - m.T.p);
   });
   const S0 = median(approx.map((b) => (b.w + b.h) / 2));
-  // tailles aberrantes (bord intérieur pris pour le contour) écartées avant la médiane
+  // outlier sizes (inner edge taken for the outline) discarded before the median
   let S = median(sizes.filter((v) => Math.abs(v - S0) < 0.15 * S0));
   if (!(S > 0)) S = S0;
   const fit = approx.map((b, i) => ({
     x: axisFit(meas[i], 'L', 'R', b.x + b.w / 2, S),
     y: axisFit(meas[i], 'T', 'B', b.y + b.h / 2, S),
   }));
-  // rangées : centre = médiane des centres mesurés (les plus fiables d'abord)
+  // rows: center = median of measured centers (most reliable first)
   const level = (list, key) => Math.max(...list.map((i) => fit[i][key].ok));
   const best = (list, key) => {
     const lvl = level(list, key);
@@ -375,9 +375,9 @@ function alignGrid(approx, meas) {
   };
   const all = approx.map((b, i) => i);
   const rows = groups(all, 'y', (i) => approx[i].y + approx[i].h / 2).map((g) => ({ g, c: best(g, 'y') }));
-  // blocs : rangées consécutives séparées par le pas régulier de la grille
+  // blocks: consecutive rows separated by the grid's regular pitch
   const gaps = rows.slice(1).map((r, i) => r.c - rows[i].c);
-  // pas de la grille = écart le plus fréquent (une rangée parasite ne doit pas le fausser)
+  // grid pitch = most frequent gap (a spurious row must not skew it)
   const support = (g) => gaps.filter((h) => Math.abs(h - g) < 0.04 * g).length;
   const pitch = gaps.reduce((a, g) => (support(g) > support(a) || (support(g) === support(a) && g < a) ? g : a), gaps[0] || 0);
   const blocks = [];
@@ -386,7 +386,7 @@ function alignGrid(approx, meas) {
     else blocks.push([r]);
   });
   const cx = new Float64Array(approx.length), cy = new Float64Array(approx.length);
-  // bloc principal (le plus d'icônes) d'abord : ses colonnes servent de repli aux autres blocs
+  // main block (most icons) first: its columns serve as fallback for the other blocks
   const size = (blk) => blk.reduce((n, r) => n + r.g.length, 0);
   blocks.sort((a, b) => size(b) - size(a));
   const mainCols = [];
@@ -397,7 +397,7 @@ function alignGrid(approx, meas) {
       let c = best(col, 'x');
       if (!bi) mainCols.push(c);
       else if (!level(col, 'x')) {
-        // aucune mesure fiable dans cette colonne : on s'aligne sur la grille principale si elle est proche
+        // no reliable measurement in this column: align to the main grid if it's close
         const near = mainCols.reduce((a, v) => (Math.abs(v - c) < Math.abs(a - c) ? v : a), Infinity);
         if (Math.abs(near - c) < 0.15 * S) c = near;
       }
@@ -407,10 +407,10 @@ function alignGrid(approx, meas) {
   return approx.map((b, i) => ({ x: cx[i] - S / 2, y: cy[i] - S / 2, w: S, h: S }));
 }
 
-// Hors grille : chaque icône garde sa propre mesure (carrée) ; une boîte sans au moins
-// 3 vrais bords droits n'est pas une icône (texture, visage, texte…).
-// Une boîte « groupe » (englobant plusieurs petites) n'est gardée que si ses 4 bords sont nets et
-// forment un carré : c'est alors un dossier, et son contenu (mini-icônes) est ignoré.
+// Off-grid: each icon keeps its own (square) measurement; a box without at least
+// 3 real straight edges is not an icon (texture, face, text…).
+// A "group" box (enclosing several smaller ones) is kept only if its 4 edges are sharp and
+// form a square: it's then a folder, and its content (mini-icons) is ignored.
 function looseBoxes(approx, meas, px, W, H) {
   let cand = [];
   approx.forEach((b, i) => {
@@ -418,21 +418,21 @@ function looseBoxes(approx, meas, px, W, H) {
     if (nOk < (b.group ? 4 : 3)) return;
     const w = m.L.ok && m.R.ok ? m.R.p - m.L.p : NaN, h = m.T.ok && m.B.ok ? m.B.p - m.T.p : NaN;
     const ref = (b.w + b.h) / 2, ms = [w, h].filter((v) => v > 0);
-    // la mesure doit être carrée et rester proche de la boîte grossière (plus large tolérance
-    // quand les deux dimensions sont mesurées et concordent)
+    // the measurement must be square and stay close to the coarse box (wider tolerance
+    // when both dimensions are measured and agree)
     if (ms.length === 2 && Math.abs(w - h) > 0.08 * Math.max(w, h)) return;
     const tol = ms.length === 2 ? [0.75, 1.3] : [0.85, 1.15];
     if (ms.some((v) => v < tol[0] * ref || v > tol[1] * ref)) return;
     const S = ms.length ? median(ms) : ref;
     const x = axisFit(m, 'L', 'R', b.x + b.w / 2, S).c - S / 2, y = axisFit(m, 'T', 'B', b.y + b.h / 2, S).c - S / 2;
-    if (x < -1 || y < -1 || x + S > W + 1 || y + S > H + 1) return; // déborde de l'image
+    if (x < -1 || y < -1 || x + S > W + 1 || y + S > H + 1) return; // overflows the image
     cand.push({ x, y, w: S, h: S, q: nOk });
   });
   const folders = findFolders(cand, px, W, H);
-  // cercle (avatar, bouton, pastille…) : pas une icône
+  // circle (avatar, button, badge…): not an icon
   cand = cand.filter((c) => squircleCorners(px, W, H, c) >= 3).concat(folders);
-  // les mieux mesurées (puis les plus grandes) d'abord ; ce qui est contenu dans une icône
-  // déjà retenue (son logo, les mini-icônes d'un dossier, un doublon) est ignoré
+  // best measured (then largest) first; anything contained in an icon
+  // already kept (its logo, a folder's mini-icons, a duplicate) is ignored
   cand.sort((a, b) => b.q - a.q || b.w - a.w);
   const out = [];
   for (const c of cand) {
@@ -442,9 +442,9 @@ function looseBoxes(approx, meas, px, W, H) {
   return out;
 }
 
-// Coins « pleins » : près de la diagonale de chaque coin, un squircle d'icône est encore à l'intérieur,
-// un cercle déjà à l'extérieur. On compare la couleur à cet endroit à celle juste à l'intérieur
-// et juste à l'extérieur des bords voisins. Renvoie le nombre de coins pleins (0 à 4).
+// "Full" corners: near each corner's diagonal, an icon squircle is still inside,
+// a circle already outside. Compare the color there with the color just inside
+// and just outside the neighboring edges. Returns the number of full corners (0 to 4).
 function squircleCorners(px, W, H, b) {
   const S = b.w;
   const col = (u, v) => {
@@ -455,20 +455,20 @@ function squircleCorners(px, W, H, b) {
   const d = (a, c) => Math.abs(a[0] - c[0]) + Math.abs(a[1] - c[1]) + Math.abs(a[2] - c[2]);
   let full = 0;
   for (const [sx, sy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-    const f = (t, s) => (s ? 1 - t : t); // coordonnée mesurée depuis le coin
+    const f = (t, s) => (s ? 1 - t : t); // coordinate measured from the corner
     const p = col(f(0.12, sx), f(0.12, sy));
     const inn = [col(f(0.06, sx), f(0.32, sy)), col(f(0.32, sx), f(0.06, sy))];
     const out = [col(f(-0.04, sx), f(0.32, sy)), col(f(0.32, sx), f(-0.04, sy))];
     const di = Math.min(...inn.map((c) => d(p, c))), dout = Math.min(...out.map((c) => d(p, c)));
-    // plein : ressemble au bord intérieur, ou du moins nettement différent de l'extérieur (icône chargée)
+    // full: looks like the inner edge, or at least clearly different from the outside (busy icon)
     if (di <= dout || dout > 60) full++;
   }
   return full;
 }
 
-// Dossier vu hors grille : ses mini-icônes (≥ 3 voisines, même taille, pas serré ≈ 1,2 × leur taille,
-// rangées remplies depuis le haut à gauche) sont détectées comme des icônes. On mesure le dossier
-// supposé autour d'elles : s'il a 4 bords nets et carrés, il passe devant (son contenu sera ignoré).
+// Folder seen off-grid: its mini-icons (≥ 3 neighbors, same size, tight pitch ≈ 1.2 × their size,
+// rows filled from the top left) are detected as icons. Measure the presumed folder
+// around them: if it has 4 sharp, square edges, it takes precedence (its content will be ignored).
 function findFolders(boxes, px, W, H) {
   const cx = (b) => b.x + b.w / 2, cy = (b) => b.y + b.h / 2;
   const linked = (a, b) => Math.abs(a.w - b.w) < 0.2 * a.w &&
@@ -484,7 +484,7 @@ function findFolders(boxes, px, W, H) {
     const xs = grp.map(cx).sort((a, c) => a - c), ys = grp.map(cy).sort((a, c) => a - c);
     const steps = xs.slice(1).map((v, i) => v - xs[i]).concat(ys.slice(1).map((v, i) => v - ys[i])).filter((d) => d > 0.6 * s);
     const pitch = steps.length ? median(steps) : 1.2 * s;
-    const F = 4 * pitch; // 3 mini-icônes + 2 marges ≈ 4 pas
+    const F = 4 * pitch; // 3 mini-icons + 2 margins ≈ 4 pitches
     const margin = (F - 2 * pitch - s) / 2;
     const guess = { x: xs[0] - s / 2 - margin, y: ys[0] - s / 2 - margin, w: F, h: F };
     const m = measureEdges(px, W, H, guess, 0.12);
@@ -497,7 +497,7 @@ function findFolders(boxes, px, W, H) {
   return out;
 }
 
-// Pastille rouge en haut à droite de l'icône (mesurée en pleine résolution).
+// Red badge at the top right of the icon (measured at full resolution).
 function findBadge(px, W, H, icon) {
   const s = Math.max(icon.w, icon.h);
   const x0 = Math.max(0, Math.round(icon.x + 0.5 * s)), x1 = Math.min(W - 1, Math.round(icon.x + 1.4 * s));
@@ -511,7 +511,7 @@ function findBadge(px, W, H, icon) {
     const i = (y * W + x) * 4, r = px[i], g = px[i + 1], b = px[i + 2];
     return r > 170 && r - g > 90 && r - b > 80;
   };
-  // départ : pixels rouges situés hors de l'icône (au-dessus ou à droite), pour ne pas confondre avec un dessin rouge de l'icône
+  // seed: red pixels outside the icon (above or to the right), so as not to confuse with red icon artwork
   const bw = x1 - x0 + 1, seen = new Uint8Array(bw * (y1 - y0 + 1));
   const stack = [];
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
@@ -534,9 +534,9 @@ function findBadge(px, W, H, icon) {
     }
   }
   const w = maxX - minX + 1, h = maxY - minY + 1;
-  if (h < 0.12 * s || h > 0.6 * s || w > 1.2 * s || w < 0.8 * h) return null; // pas une pastille
-  if (maxX >= x1 || minY <= y0) return null; // touche le bord de la zone : c'est autre chose (icône voisine…)
-  // bord anticrénelé : on avance d'un demi-pixel par côté si la rangée / colonne voisine est encore un peu rouge
+  if (h < 0.12 * s || h > 0.6 * s || w > 1.2 * s || w < 0.8 * h) return null; // not a badge
+  if (maxX >= x1 || minY <= y0) return null; // touches the edge of the zone: it's something else (neighboring icon…)
+  // anti-aliased edge: extend by half a pixel per side if the neighboring row / column is still slightly red
   const fringe = (xa, ya, xb, yb) => {
     let m = 0;
     for (let y = Math.max(0, ya); y <= Math.min(H - 1, yb); y++) for (let x = Math.max(0, xa); x <= Math.min(W - 1, xb); x++) m = Math.max(m, redness(x, y));
@@ -547,15 +547,15 @@ function findBadge(px, W, H, icon) {
   return { x: minX - l, y: minY - t, w: w + l + r, h: h + t + b };
 }
 
-/* ---------- Mode grille (écran d'accueil) ---------- */
+/* ---------- Grid mode (home screen) ---------- */
 
-// Score d'un carré : part des points de chaque côté (partie droite, hors coins arrondis)
-// qui tombent sur un contour. On garde le plus faible des 4 côtés.
-// need : score minimal attendu ; on abandonne (0) dès qu'il devient inatteignable (balayage rapide).
+// Score of a square: share of points on each side (straight part, excluding rounded corners)
+// that land on an edge. Keep the weakest of the 4 sides.
+// need: minimum expected score; bail out (0) as soon as it becomes unreachable (fast scan).
 function sideScore(m, W, x, y, s, need = 0) {
   const n = 10, maxMiss = n - Math.ceil(need * n - 1e-9);
   const o = sideOffsets(s);
-  // les 4 côtés sont parcourus en parallèle : un côté vide fait abandonner au plus tôt
+  // the 4 sides are walked in parallel: an empty side triggers the earliest bail-out
   const top = y * W + x, bottom = (y + s - 1) * W + x, right = top + s - 1;
   let c0 = 0, c1 = 0, c2 = 0, c3 = 0;
   for (let k = 0; k < n; k++) {
@@ -568,7 +568,7 @@ function sideScore(m, W, x, y, s, need = 0) {
   return Math.min(c0, c1, c2, c3) / n;
 }
 
-// positions des 10 points le long d'un côté (partie droite), mémorisées par taille (appel très fréquent)
+// positions of the 10 points along a side (straight part), cached per size (called very often)
 function sideOffsets(s) {
   let o = sideOffsets.cache[s];
   if (!o) {
@@ -579,13 +579,13 @@ function sideOffsets(s) {
 }
 sideOffsets.cache = {};
 
-// Intérieur près du bord uniforme (fond de l'icône) et différent de l'extérieur.
+// Interior near the edge is uniform (icon background) and different from the outside.
 function ringScore(px, W, H, x, y, s) {
   const n = 10, ins = Math.max(2, Math.round(s * 0.1)), ou = Math.max(2, Math.round(s * 0.06));
   const o = sideOffsets(s);
   const inC = ringScore.inC, outC = ringScore.outC;
   let ni = 0, no = 0;
-  // 4 points par position le long du bord : 2 côtés horizontaux, 2 verticaux (à l'intérieur puis à l'extérieur)
+  // 4 points per position along the edge: 2 horizontal sides, 2 vertical (inside then outside)
   for (let k = 0; k < n; k++) {
     const ok = o[k];
     for (let j = 0; j < 8; j++) {
@@ -600,7 +600,7 @@ function ringScore(px, W, H, x, y, s) {
     }
   }
   if (!ni) return { uni: 0, diff: 0 };
-  // couleur médiane du bord intérieur, canal par canal
+  // median color of the inner edge, channel by channel
   const v = ringScore.ch.subarray(0, ni);
   const med = [0, 0, 0];
   for (let c = 0; c < 3; c++) {
@@ -618,7 +618,7 @@ function ringScore(px, W, H, x, y, s) {
 }
 ringScore.inC = new Uint8Array(120); ringScore.outC = new Uint8Array(120); ringScore.ch = new Uint8Array(40);
 
-// k-ième plus petite valeur (sélection rapide, modifie le tableau)
+// k-th smallest value (quickselect, modifies the array)
 function kth(a, k) {
   let lo = 0, hi = a.length - 1;
   while (lo < hi) {
@@ -634,14 +634,14 @@ function kth(a, k) {
   return a[k];
 }
 
-// Carrés « sûrs » : 4 côtés nets, bord intérieur uniforme, contraste avec l'extérieur.
-// On ignore les petits carrés contenus dans un plus grand (ex. mini-icônes d'un dossier).
+// "Confident" squares: 4 sharp sides, uniform inner edge, contrast with the outside.
+// Ignore small squares contained in a larger one (e.g. a folder's mini-icons).
 function findSquares(px, grad, W, H) {
   const N = W * H, minDim = Math.min(W, H);
 
   const e = new Uint8Array(N);
   for (let p = 0; p < N; p++) e[p] = grad[p] > 24 ? 1 : 0;
-  // contours épaissis : tolère un pas de balayage grossier
+  // thickened edges: tolerates a coarse scan step
   const m = dilate(e, W, H, Math.max(2, Math.round(minDim / 200)));
   const seeds = [];
   for (let S = minDim * 0.06; S <= minDim * 0.45; S *= 1.04) {
@@ -656,8 +656,8 @@ function findSquares(px, grad, W, H) {
   }
   seeds.sort((a, b) => b.score - a.score);
   const strong = [];
-  // suppression des doublons entre carrés de taille voisine seulement : un petit carré net à l'intérieur
-  // d'une icône (logo, mini-icône de dossier) ne doit pas masquer l'icône elle-même (trié plus bas)
+  // remove duplicates only between squares of similar size: a small sharp square inside
+  // an icon (logo, folder mini-icon) must not hide the icon itself (sorted below)
   for (const c of seeds) if (!strong.some((k) => iou(c, k) > 0.3 && Math.max(c.w, k.w) < 1.3 * Math.min(c.w, k.w))) strong.push(c);
   return strong.filter((c) => !strong.some((k) => k.w > c.w * 1.3 && overlap(c, k) > 0.7 * c.w * c.h));
 }
@@ -666,8 +666,8 @@ function detectGrid(px, grad, W, H, outer) {
   const N = W * H;
   const edgeMap = (T, R) => { const e = new Uint8Array(N); for (let p = 0; p < N; p++) e[p] = grad[p] > T ? 1 : 0; return dilate(e, W, H, R); };
 
-  // b) Taille dominante
-  // pour chaque taille possible, on mesure à quel point les carrés forment une grille (colonnes ET rangées partagées)
+  // b) Dominant size
+  // for each candidate size, measure how well the squares form a grid (shared columns AND rows)
   const cluster = (vals, tol) => {
     vals = [...vals].sort((a, b) => a - b);
     const out = [];
@@ -691,10 +691,10 @@ function detectGrid(px, grad, W, H, outer) {
   if (best.length < 5) return null;
   const S = best.map((b) => b.w).sort((a, b) => a - b)[best.length >> 1];
 
-  // c) Colonnes (au moins 2 icônes sûres) et rangées
+  // c) Columns (at least 2 confident icons) and rows
   const tol = 0.4 * S;
-  // deux icônes ne se chevauchent pas : des lignes plus proches que 0,8 × la taille sont des doublons
-  // (on garde la mieux soutenue)
+  // two icons don't overlap: lines closer than 0.8 × the size are duplicates
+  // (keep the best supported)
   const distinct = (cl) => {
     const out = [];
     for (const c of [...cl].sort((a, b) => b.n - a.n)) if (!out.some((o) => Math.abs(o.c - c.c) < 0.8 * S)) out.push(c);
@@ -702,11 +702,11 @@ function detectGrid(px, grad, W, H, outer) {
   };
   const colCl = cluster(best.map((b) => b.x + b.w / 2), tol);
   let cols = distinct(colCl.filter((c) => c.n >= 2));
-  // une rangée peut ne contenir qu'une icône sûre (ex. le dock), si celle-ci est dans une colonne connue
+  // a row may contain just one confident icon (e.g. the dock), if it's in a known column
   const onCol = best.filter((b) => cols.some((c) => Math.abs(c - (b.x + b.w / 2)) < tol));
   let rows = distinct(cluster(onCol.map((b) => b.y + b.h / 2), tol));
   if (cols.length < 2 || rows.length < 2) return null;
-  // colonnes / rangées manquantes : on teste aussi un pas de grille avant/après et dans les trous
+  // missing columns / rows: also try one grid pitch before/after and in the gaps
   const extend = (lines, max) => {
     if (lines.length < 2) return lines;
     const pitch = Math.min(...lines.slice(1).map((v, i) => v - lines[i]));
@@ -719,9 +719,9 @@ function detectGrid(px, grad, W, H, outer) {
   cols = extend(cols.sort((a, b) => a - b), W);
   rows = extend(rows.sort((a, b) => a - b), H);
 
-  // d) Vérification de chaque case, avec un léger recalage.
-  //    Une case douteuse (icône claire sur fond clair…) est gardée « à confirmer » : la mesure
-  //    fine en pleine résolution décidera (detectIcons).
+  // d) Check each cell, with a slight realignment.
+  //    A doubtful cell (light icon on light background…) is kept as "to confirm": the fine
+  //    full-resolution measurement will decide (detectIcons).
   const mLow = edgeMap(14, 1);
   const found = [];
   const r = Math.round(0.2 * S);
@@ -739,13 +739,13 @@ function detectGrid(px, grad, W, H, outer) {
     if (!bestCell) continue;
     const { diff } = ringScore(px, W, H, bestCell.x, bestCell.y, bestCell.w);
     if (bestCell.e < 0.85 || diff < 0.4) {
-      // recentrée sur la grille (le recalage n'a rien trouvé de fiable)
+      // re-centered on the grid (realignment found nothing reliable)
       bestCell = { x: cx - S / 2, y: cy - S / 2, w: S, h: S, e: 0, weak: true };
       if (bestCell.x < 0 || bestCell.y < 0 || bestCell.x + S > W || bestCell.y + S > H) continue;
     }
     found.push(bestCell);
   }
-  // une seule case par emplacement
+  // only one cell per slot
   found.sort((a, b) => b.e - a.e);
   const cells = [];
   for (const c of found) if (!cells.some((k) => iou(c, k) > 0.2)) cells.push(c);
@@ -809,7 +809,7 @@ function iou(a, b) {
 }
 
 function dilate(src, W, H, R) {
-  // dilatation carrée séparable via sommes glissantes
+  // separable square dilation via sliding sums
   const tmp = new Uint8Array(W * H), out = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) {
     let sum = 0;
@@ -839,55 +839,55 @@ function overlap(a, b) {
   return w > 0 && h > 0 ? w * h : 0;
 }
 
-/* ---------- Affichage ---------- */
+/* ---------- Display ---------- */
 
-let pieces = [];      // une pièce = une icône découpée (+ sa pastille), qui fond d'un bloc
+let pieces = [];      // a piece = one cut-out icon (+ its badge), melting as a unit
 let state = 'idle';   // idle → melting ⇄ returning → idle
 let clock = 0, dir = 1, rafId = 0, lastNow = 0, bgId = 0, lastKey = '';
 const canvas = $('melt');
 let gl = null, prog = null, mesh = null;
 
-/* ---------- Simulation physique du plastique qui fond ----------
- * Modèle : chaque icône est une fine couche de plastique collée au mur (l'écran), vue de face.
- * Le maillage est lagrangien : chaque sommet est un point matériel qui transporte sa couleur.
- *  - Masse conservée : chaque triangle garde son volume V ; épaisseur h = V / aire.
- *  - Frottement de lubrification contre le mur : force = μ·aire/h · vitesse
- *    → vitesse libre d'un film qui coule : u ≈ ρ g h² / μ (les zones épaisses coulent plus vite).
- *  - Viscosité de membrane (feuille visqueuse mince) : σ = 2 μ h (D + tr(D) I)
- *    → un filet étiré s'amincit ET se rétrécit latéralement (Trouton), d'où le pincement des coulures.
- *  - Tension de surface : tension isotrope de la feuille → arrondit les bords, ramasse les filets en gouttes.
- *  - Incompressibilité (pénalité) : la matière écrasée au sol pousse sur les côtés → la flaque s'étale
- *    (courant de gravité) et se stabilise quand la tension de surface équilibre la pression.
- *  - Chaleur : un front de fusion gagne par les bords (le bas d'abord, le haut en dernier, avec des points
- *    chauds le long du bas) ; viscosité d'Arrhenius μ = μchaud·300^(1−T). Le cœur reste collé au mur
- *    pendant que le bas s'affaisse et coule : coulures, pincement, puis tout glisse jusqu'à la flaque.
- * Le pas est surdamped (Stokes, pas d'inertie) et implicite en viscosité : on résout (C + K) v = f par
- * gradient conjugué. La simulation est déterministe et enregistrée (30 images/s) : le retour arrière
- * relit simplement l'enregistrement, et à t = 0 le maillage est exactement la grille d'origine.
+/* ---------- Physical simulation of melting plastic ----------
+ * Model: each icon is a thin layer of plastic stuck to the wall (the screen), seen from the front.
+ * The mesh is Lagrangian: each vertex is a material point carrying its color.
+ *  - Mass conservation: each triangle keeps its volume V; thickness h = V / area.
+ *  - Lubrication friction against the wall: force = μ·area/h · velocity
+ *    → free velocity of a flowing film: u ≈ ρ g h² / μ (thick areas flow faster).
+ *  - Membrane viscosity (thin viscous sheet): σ = 2 μ h (D + tr(D) I)
+ *    → a stretched strand thins AND narrows laterally (Trouton), hence the necking of drips.
+ *  - Surface tension: isotropic sheet tension → rounds the edges, gathers strands into drops.
+ *  - Incompressibility (penalty): material squashed on the floor pushes sideways → the puddle spreads
+ *    (gravity current) and settles when surface tension balances pressure.
+ *  - Heat: a melting front advances from the edges (bottom first, top last, with hot
+ *    spots along the bottom); Arrhenius viscosity μ = μhot·300^(1−T). The core stays stuck to the wall
+ *    while the bottom sags and flows: drips, necking, then everything slides down into the puddle.
+ * The step is overdamped (Stokes, no inertia) and implicit in viscosity: we solve (C + K) v = f by
+ * conjugate gradient. The simulation is deterministic and recorded (30 frames/s): rewinding
+ * simply replays the recording, and at t = 0 the mesh is exactly the original grid.
  */
 const SIM = {
-  N: 24,            // maillage N×N quadrilatères
-  FPS: 30,          // images enregistrées par seconde (le pas de simulation est adaptatif, ≤ 1/60 s)
-  Q: 1000,          // quantification des positions (Int16)
-  G: 1,             // gravité (unités : hauteur d'icône, seconde)
-  SPEED: 0.42,      // calibre la viscosité : le gros de la matière atteint le sol vers 42 % de la durée
-  VISC_RATIO: 300,  // viscosité plastique froid / fondu (Arrhenius)
-  LAMBDA2: 0.012,   // (longueur de couplage de membrane)² : fixe la largeur typique d'une coulure
-  EXP: 2,           // mobilité ∝ h^EXP (film en lubrification : u = ρ g h² / 3μ)
-  HMIN: 0.2, HCAP: 2.5, // bornes de l'épaisseur dans la mobilité (les filets très fins ne gèlent pas)
-  K: 14,            // incompressibilité près du sol (la flaque s'empile et s'étale au lieu de s'écraser)
-  K_AIR: 14,        // incompressibilité sur le mur (le bas qui gonfle quand le haut s'affaisse)
-  COMP_MAX: 2,      // compression max prise en compte
-  GAMMA: 0.05,      // tension de surface (arrondit bords et gouttes)
-  SQUEEZE: 60, SQUEEZE_H: 1.0, // freinage vertical près du sol (hauteur en icônes)
-  FLOOR_FRICTION: 300, // ligne de contact au sol : la flaque s'étale lentement puis se fige
-  GHOST: 0.35,      // poids des zones transparentes (elles suivent la matière sans la perturber)
-  HEAT_B: 1, HEAT_S: 1.6, HEAT_T: 2.2, HEAT_NOISE: 0.05, // front de chaleur : bas, côtés, haut, irrégularité
-  CG_IT: 10,        // itérations du gradient conjugué (démarré à la vitesse précédente)
-  CFL: 1.2, STRAIN: 1, // limites du pas adaptatif (mailles parcourues, déformation par pas)
+  N: 24,            // N×N quad mesh
+  FPS: 30,          // recorded frames per second (the simulation step is adaptive, ≤ 1/60 s)
+  Q: 1000,          // position quantization (Int16)
+  G: 1,             // gravity (units: icon height, second)
+  SPEED: 0.42,      // calibrates viscosity: the bulk of the material reaches the floor at ~42% of the duration
+  VISC_RATIO: 300,  // cold / molten plastic viscosity ratio (Arrhenius)
+  LAMBDA2: 0.012,   // (membrane coupling length)²: sets the typical width of a drip
+  EXP: 2,           // mobility ∝ h^EXP (lubrication film: u = ρ g h² / 3μ)
+  HMIN: 0.2, HCAP: 2.5, // thickness bounds in the mobility (very thin strands don't freeze)
+  K: 14,            // incompressibility near the floor (the puddle piles up and spreads instead of flattening)
+  K_AIR: 14,        // incompressibility on the wall (the bottom bulging as the top sags)
+  COMP_MAX: 2,      // max compression taken into account
+  GAMMA: 0.05,      // surface tension (rounds edges and drops)
+  SQUEEZE: 60, SQUEEZE_H: 1.0, // vertical braking near the floor (height in icons)
+  FLOOR_FRICTION: 300, // floor contact line: the puddle spreads slowly then sets
+  GHOST: 0.35,      // weight of transparent areas (they follow the material without disturbing it)
+  HEAT_B: 1, HEAT_S: 1.6, HEAT_T: 2.2, HEAT_NOISE: 0.05, // heat front: bottom, sides, top, irregularity
+  CG_IT: 10,        // conjugate gradient iterations (warm-started from the previous velocity)
+  CFL: 1.2, STRAIN: 1, // adaptive step limits (cells traveled, strain per step)
 };
 
-function rng(seed) { // mulberry32 : déterministe
+function rng(seed) { // mulberry32: deterministic
   return () => {
     seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
     let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -897,7 +897,7 @@ function rng(seed) { // mulberry32 : déterministe
 }
 const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
-// bruit de valeur 2D lisse (grille G×G)
+// smooth 2D value noise (G×G grid)
 function valueNoise(rand, G) {
   const g = new Float32Array((G + 1) * (G + 1)).map(() => rand() * 2 - 1);
   return (u, v) => {
@@ -907,7 +907,7 @@ function valueNoise(rand, G) {
   };
 }
 
-// topologie partagée : (N+1)² sommets, diagonales alternées (pas de biais d'orientation)
+// shared topology: (N+1)² vertices, alternating diagonals (no orientation bias)
 const TOPO = (() => {
   const N = SIM.N, n = N + 1, tris = [];
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
@@ -917,7 +917,7 @@ const TOPO = (() => {
   return { n, NV: n * n, NT: tris.length / 3, tris: new Uint16Array(tris) };
 })();
 
-// géométrie d'un triangle : aire signée et gradients des fonctions de forme (dans g[0..5])
+// triangle geometry: signed area and shape-function gradients (in g[0..5])
 function triGeom(P, a, b, c, g) {
   const x0 = P[2 * a], y0 = P[2 * a + 1], x1 = P[2 * b], y1 = P[2 * b + 1], x2 = P[2 * c], y2 = P[2 * c + 1];
   const A = 0.5 * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
@@ -932,7 +932,7 @@ function makeSim(p, alphaAt, rand, floorY, aspect) {
     u[k] = i / N; v[k] = j / N;
     pos[2 * k] = u[k] * aspect; pos[2 * k + 1] = v[k];
   }
-  // alpha de l'icône (coins arrondis, zone vide autour de la pastille) et facteur de bord lissé
+  // icon alpha (rounded corners, empty area around the badge) and smoothed edge factor
   const alpha = new Float32Array(NV);
   for (let k = 0; k < NV; k++) alpha[k] = alphaAt(u[k], v[k]);
   let edge = alpha.slice();
@@ -949,7 +949,7 @@ function makeSim(p, alphaAt, rand, floorY, aspect) {
     edge = e2;
   }
 
-  // coulures : points chauds le long du bas, plus épais (ils coulent plus vite : u ∝ h²)
+  // drips: hot spots along the bottom, thicker (they flow faster: u ∝ h²)
   const bumps = [], nb = 3 + Math.floor(rand() * 3);
   for (let k = 0; k < nb; k++) bumps.push([0.08 + 0.84 * rand(), 0.035 + 0.05 * rand(), 0.5 + 0.5 * rand()]);
   const hot = (x) => Math.min(1, bumps.reduce((s, [c, w, a]) => s + a * Math.exp(-(((x - c) / w) ** 2)), 0));
@@ -959,14 +959,14 @@ function makeSim(p, alphaAt, rand, floorY, aspect) {
   for (let k = 0; k < NV; k++) {
     const hb = hot(u[k]);
     h0[k] = 1 + 0.18 * nz(u[k], v[k]) + 0.7 * hb * sstep(0.45, 1, v[k]);
-    // distance au front de chaleur : la chaleur gagne par les bords (le bas d'abord, puis les côtés,
-    // le haut en dernier) → le cœur et le haut restent collés au mur pendant que le bas coule
+    // distance to the heat front: heat advances from the edges (bottom first, then sides,
+    // top last) → the core and top stay stuck to the wall while the bottom flows
     const side = Math.min(u[k], 1 - u[k]);
     let d = Math.min((1 - v[k]) * SIM.HEAT_B, side * SIM.HEAT_S, v[k] * SIM.HEAT_T) + SIM.HEAT_NOISE * (nz2(u[k], v[k]) + 1);
     d -= 0.15 * hb * v[k] * v[k];
     dist[k] = Math.max(0, d);
   }
-  // volumes conservés (pondérés par l'alpha : le vide autour de la pastille ne pèse presque rien)
+  // conserved volumes (alpha-weighted: the empty area around the badge weighs almost nothing)
   const Vt = new Float64Array(NT), A0 = new Float64Array(NT), Vv = new Float64Array(NV), Aw0 = new Float64Array(NV);
   const at = new Float32Array(NT);
   for (let t = 0; t < NT; t++) {
@@ -977,13 +977,13 @@ function makeSim(p, alphaAt, rand, floorY, aspect) {
     Vt[t] = Math.abs(A) * (h0[a] + h0[b] + h0[c]) / 3 * Math.max(SIM.GHOST, at[t]);
     for (const q of [a, b, c]) { Vv[q] += Vt[t] / 3; Aw0[q] += Math.abs(A) / 3; }
   }
-  // contact avec le mur ∝ poids : les zones transparentes, plus légères ET moins frottantes,
-  // tombent à la même vitesse que la matière voisine (sinon elles traînent ou s'envolent)
+  // wall contact ∝ weight: transparent areas, lighter AND less frictional,
+  // fall at the same speed as the neighboring material (otherwise they lag or fly off)
   for (let k = 0; k < NV; k++) contact[k] = Vv[k] / (Aw0[k] * h0[k]);
   return {
     pos, vel: new Float64Array(2 * NV), u, v, alpha, edge, h0, dist, contact, Vt, A0, Vv, Aw0, at,
     floor: floorY, aspect, dur: p.dur, steps: 0, time: 0, dtNext: 1 / 60, rec: [quantize(pos)],
-    // vitesse calibrée sur la hauteur de chute : le gros de la matière arrive au sol vers 60 % de la durée
+    // speed calibrated on fall height: the bulk of the material reaches the floor at ~60% of the duration
     mu: SIM.G * SIM.SPEED * p.dur / Math.max(1.5, floorY),
     // scratch
     T: new Float32Array(NV), md: new Float64Array(NV), lmd: new Float64Array(NV), c: new Float64Array(2 * NV), f: new Float64Array(2 * NV),
@@ -999,19 +999,19 @@ function quantize(pos) {
   return q;
 }
 
-// température 0 (solide) … 1 (fondu) d'un point matériel à l'instant tau
+// temperature 0 (solid) … 1 (molten) of a material point at time tau
 function heat(s, k, tau) {
   const x = (tau * 0.34 - s.dist[k]) / 0.16;
   return x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x);
 }
 
-// produit (C + K)·v : frottement contre le mur + viscosité de membrane (implicite)
+// product (C + K)·v: wall friction + membrane viscosity (implicit)
 function applyK(s, x, out) {
   const { tris, NT, NV } = TOPO, G = s.G;
   for (let k = 0; k < 2 * NV; k++) out[k] = s.c[k] * x[k];
   for (let t = 0; t < NT; t++) {
     const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2], o = 6 * t;
-    // gradient de vitesse L = Σ v_a ⊗ ∇N_a
+    // velocity gradient L = Σ v_a ⊗ ∇N_a
     const Lxx = x[2 * a] * G[o] + x[2 * b] * G[o + 2] + x[2 * c] * G[o + 4];
     const Lxy = x[2 * a] * G[o + 1] + x[2 * b] * G[o + 3] + x[2 * c] * G[o + 5];
     const Lyx = x[2 * a + 1] * G[o] + x[2 * b + 1] * G[o + 2] + x[2 * c + 1] * G[o + 4];
@@ -1040,22 +1040,22 @@ function simStep(s, dt) {
     const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2], o = 6 * t;
     const g = triGeom(P, a, b, c);
     const A0 = s.A0[t], sg = Math.sign(A0);
-    // aire signée bornée (un triangle écrasé ne doit pas exploser)
+    // bounded signed area (a squashed triangle must not blow up)
     const Ac = Math.max(g.A * sg, 0.08 * Math.abs(A0)), As = Ac * sg;
     const i2 = 1 / (2 * As);
     G[o] = (g.y1 - g.y2) * i2; G[o + 1] = (g.x2 - g.x1) * i2;
     G[o + 2] = (g.y2 - g.y0) * i2; G[o + 3] = (g.x0 - g.x2) * i2;
     G[o + 4] = (g.y0 - g.y1) * i2; G[o + 5] = (g.x1 - g.x0) * i2;
     const h = s.Vt[t] / Ac, ratio = Math.abs(A0) / Ac;
-    const mu = s.mu * Math.exp((s.lmd[a] + s.lmd[b] + s.lmd[c]) / 3) * SIM.LAMBDA2; // moyenne géométrique
-    const hm = Math.max(h, 0.25 * s.at[t] + 0.02);     // les fantômes (zones transparentes) suivent
+    const mu = s.mu * Math.exp((s.lmd[a] + s.lmd[b] + s.lmd[c]) / 3) * SIM.LAMBDA2; // geometric mean
+    const hm = Math.max(h, 0.25 * s.at[t] + 0.02);     // ghosts (transparent areas) follow along
     s.eta[t] = 2 * mu * hm * Ac;
     const comp = Math.min(SIM.COMP_MAX, Math.max(0, ratio - 1));
     const yc = (g.y0 + g.y1 + g.y2) / 3, Kt = SIM.K_AIR + (SIM.K - SIM.K_AIR) * sstep(0.8, 0.1, s.floor - yc);
-    s.lam[t] = dt * Kt * h * ratio * Ac * (comp > 0 ? 1 : 0);  // pression linéarisée (Euler implicite)
-    // contrainte isotrope : pression de compression − tension de surface
+    s.lam[t] = dt * Kt * h * ratio * Ac * (comp > 0 ? 1 : 0);  // linearized pressure (implicit Euler)
+    // isotropic stress: compression pressure − surface tension
     const st = Kt * h * comp - SIM.GAMMA * s.at[t] * Math.sqrt(s.T[a]);
-    // force = st · ∂A/∂p (vraie aire signée : pousse toujours à « dé-retourner » un triangle écrasé)
+    // force = st · ∂A/∂p (true signed area: always pushes to "un-flip" a squashed triangle)
     s.f[2 * a] += st * 0.5 * (g.y1 - g.y2) * sg; s.f[2 * a + 1] += st * 0.5 * (g.x2 - g.x1) * sg;
     s.f[2 * b] += st * 0.5 * (g.y2 - g.y0) * sg; s.f[2 * b + 1] += st * 0.5 * (g.x0 - g.x2) * sg;
     s.f[2 * c] += st * 0.5 * (g.y0 - g.y1) * sg; s.f[2 * c + 1] += st * 0.5 * (g.x1 - g.x0) * sg;
@@ -1067,21 +1067,21 @@ function simStep(s, dt) {
       s.Aw[vtx] += Ac / 3;
     }
   }
-  // en fin de fonte, les filets minces restés sur le mur finissent de s'écouler dans la flaque
+  // at the end of the melt, thin strands left on the wall finish draining into the puddle
   const late = sstep(0.3 * s.dur, 0.65 * s.dur, tau);
   const hmin = SIM.HMIN + (1 - SIM.HMIN) * late, boost = 1 + 3 * late;
   for (let k = 0; k < NV; k++) {
     const h = s.Vv[k] / s.Aw[k];
-    // frottement de lubrification : μ·aire/h (le froid colle au mur)
-    // épaisseur réelle du film (hors pondération des zones transparentes) → vitesse libre ∝ h^EXP / μ
-    // (les zones transparentes n'ont pas d'épaisseur propre : elles suivent à vitesse nominale)
+    // lubrication friction: μ·area/h (cold sticks to the wall)
+    // actual film thickness (excluding transparent-area weighting) → free velocity ∝ h^EXP / μ
+    // (transparent areas have no thickness of their own: they follow at nominal speed)
     let hr = Math.min(Math.max(h / s.contact[k], hmin), SIM.HCAP);
     hr += (s.h0[k] - hr) * (1 - s.alpha[k]);
-    const bk = 1 + (boost - 1) * sstep(0.3, 1, s.floor - P[2 * k + 1]);   // la flaque, elle, n'accélère pas
+    const bk = 1 + (boost - 1) * sstep(0.3, 1, s.floor - P[2 * k + 1]);   // the puddle itself doesn't speed up
     let cw = s.md[k] * s.contact[k] * s.Aw[k] / (Math.pow(hr, SIM.EXP - 1) * bk) + 1e-7;
     s.fixY[k] = P[2 * k + 1] >= s.floor - 1e-6 ? 1 : 0;
-    // près du sol, la descente est freinée (écrasement d'un film visqueux : « squeeze flow ») →
-    // la matière s'empile en bourrelet puis s'étale, au lieu d'être laminée d'un coup
+    // near the floor, the descent is braked (viscous film squeezing: "squeeze flow") →
+    // the material piles into a bulge then spreads, instead of being flattened all at once
     const gap = Math.max(0, s.floor - P[2 * k + 1]) / SIM.SQUEEZE_H;
     const sq = gap < 1 ? 1 + SIM.SQUEEZE * (1 - gap) * (1 - gap) : 1;
     s.c[2 * k] = cw * (s.fixY[k] ? SIM.FLOOR_FRICTION : 1); s.c[2 * k + 1] = cw * sq;
@@ -1089,7 +1089,7 @@ function simStep(s, dt) {
     s.diag[2 * k] += s.c[2 * k]; s.diag[2 * k + 1] += s.c[2 * k + 1];
     if (s.fixY[k]) { s.f[2 * k + 1] = Math.min(0, s.f[2 * k + 1]); }
   }
-  // gradient conjugué préconditionné (Jacobi), démarré à la vitesse précédente
+  // preconditioned conjugate gradient (Jacobi), warm-started from the previous velocity
   const x = s.vel, r = s.r, z = s.z, d = s.d, Kd = s.Kd, M = 2 * NV;
   for (let k = 0; k < NV; k++) if (s.fixY[k]) x[2 * k + 1] = 0;
   applyK(s, x, Kd);
@@ -1110,7 +1110,7 @@ function simStep(s, dt) {
     const be = rz2 / rz; rz = rz2;
     for (let k = 0; k < M; k++) d[k] = z[k] + be * d[k];
   }
-  // intégration + sol (garde-fou : vitesse bornée par la chute libre la plus rapide possible)
+  // integration + floor (safeguard: velocity capped by the fastest possible free fall)
   let vmax = 1e-6;
   const vlim = 7 * SIM.G / s.mu;
   for (let k = 0; k < NV; k++) {
@@ -1122,7 +1122,7 @@ function simStep(s, dt) {
     P[2 * k + 1] += x[2 * k + 1] * dt;
     if (P[2 * k + 1] > s.floor) { P[2 * k + 1] = s.floor; if (x[2 * k + 1] > 0) x[2 * k + 1] = 0; }
   }
-  // taux de déformation max (la translation d'ensemble, elle, ne limite pas le pas)
+  // max strain rate (overall translation doesn't limit the step)
   let lmax = 1e-6;
   for (let t = 0; t < NT; t++) {
     const a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2], o = 6 * t;
@@ -1133,11 +1133,11 @@ function simStep(s, dt) {
     lmax = Math.max(lmax, Math.abs(Lxx) + Math.abs(Lxy) + Math.abs(Lyx) + Math.abs(Lyy));
   }
   s.steps++; s.time += dt;
-  // pas suivant : déformation ≤ 15 % par pas, déplacement ≤ 1 maille (le sol écrase sinon les rangées)
+  // next step: strain ≤ 15% per step, displacement ≤ 1 cell (otherwise the floor crushes the rows)
   s.dtNext = Math.max(1 / 1000, Math.min(1 / 60, SIM.CFL / (SIM.N * vmax), SIM.STRAIN / lmax));
 }
 
-// avance la simulation d'une pièce jusqu'à l'image enregistrée `frame`
+// advance a piece's simulation up to recorded frame `frame`
 function simulateTo(p, frame) {
   const s = p.sim, last = p.frames;
   frame = Math.min(frame, last);
@@ -1149,8 +1149,8 @@ function simulateTo(p, frame) {
   }
 }
 
-// calcul en tâche de fond (dès la détection), par tranches de quelques ms : on avance toujours
-// la pièce dont l'image manquante sera montrée le plus tôt, pour rester en avance sur l'animation
+// background computation (right after detection), in slices of a few ms: always advance
+// the piece whose missing frame will be shown soonest, to stay ahead of the animation
 function backgroundSim() {
   const t0 = performance.now();
   while (performance.now() - t0 < 4) {
@@ -1178,7 +1178,7 @@ function runDetection() {
     left: b.x * 100 + '%', top: b.y * 100 + '%', width: b.w * 100 + '%', height: b.h * 100 + '%',
   });
 
-  // zones floutées (visibles quand l'icône a fondu)
+  // blurred areas (visible once the icon has melted)
   for (const b of icons) {
     const el = document.createElement('div');
     el.className = b.badge ? 'icon-box badge' : 'icon-box';
@@ -1186,7 +1186,7 @@ function runDetection() {
     stage.appendChild(el);
   }
 
-  // une texture par pièce : l'icône (coins arrondis) + sa pastille, découpées dans l'image d'origine
+  // one texture per piece: the icon (rounded corners) + its badge, cut from the original image
   const nw = currentImage.naturalWidth, nh = currentImage.naturalHeight;
   if (gl) pieces.forEach((p) => gl.deleteTexture(p.tex));
   pieces = [];
@@ -1218,8 +1218,8 @@ function runDetection() {
       return data[(py * cv.width + px) * 4 + 3] / 255;
     };
     delay += 0.06 + Math.random() * 0.22;
-    const floorY = (1 - b.y) / b.h;                       // sol (bas de l'image), en hauteurs d'icône
-    const aspect = (b.w * nw) / (b.h * nh);               // largeur / hauteur réelles de la pièce
+    const floorY = (1 - b.y) / b.h;                       // floor (bottom of the image), in icon heights
+    const aspect = (b.w * nw) / (b.h * nh);               // actual width / height of the piece
     const p = { b, tex: makeTexture(cv), delay, dur: 3.6 + 0.07 * floorY + Math.random() * 1.2 };
     p.frames = Math.ceil(p.dur * SIM.FPS);
     p.dur = p.frames / SIM.FPS;
@@ -1229,13 +1229,13 @@ function runDetection() {
   bgId = setTimeout(backgroundSim, 50);
 }
 
-/* ---------- WebGL : chaque icône est un maillage déformé par la simulation ---------- */
+/* ---------- WebGL: each icon is a mesh deformed by the simulation ---------- */
 
 const VS = `
-attribute vec2 aPos;     // position en px CSS
+attribute vec2 aPos;     // position in CSS px
 attribute vec2 aUV;
-attribute vec2 aGrad;    // pente de la surface du plastique (dz/dx, dz/dy)
-attribute vec2 aInfo;    // épaisseur relative h/h0, fusion 0..1
+attribute vec2 aGrad;    // slope of the plastic surface (dz/dx, dz/dy)
+attribute vec2 aInfo;    // relative thickness h/h0, melt 0..1
 uniform vec2 uRes;
 varying vec2 vUV;
 varying vec2 vGrad;
@@ -1253,18 +1253,18 @@ varying vec2 vUV;
 varying vec2 vGrad;
 varying vec2 vInfo;
 void main() {
-  vec4 c = texture2D(uTex, vUV);          // prémultiplié
-  float m = vInfo.y;                      // 0 : icône intacte (rendu identique à la capture)
+  vec4 c = texture2D(uTex, vUV);          // premultiplied
+  float m = vInfo.y;                      // 0: intact icon (renders identical to the screenshot)
   float thin = vInfo.x;
-  // normale de la surface (y vers le bas, z vers l'observateur)
+  // surface normal (y down, z toward the viewer)
   vec3 n = normalize(vec3(-vGrad, 1.0));
   vec3 L = normalize(vec3(-0.45, -0.75, 0.9));
   vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
   float diff = 1.0 + 0.35 * (dot(n, L) - L.z);
   float nh = max(dot(n, H), 0.0);
-  float spec = pow(nh, 90.0) * 0.6 + pow(nh, 14.0) * 0.06;     // reflet net + lustre large
-  float fres = pow(1.0 - n.z, 3.0) * 0.12;                       // reflet rasant sur les bords bombés
-  // plastique fondu : un peu plus saturé, plus sombre et translucide là où il s'étire
+  float spec = pow(nh, 90.0) * 0.6 + pow(nh, 14.0) * 0.06;     // sharp highlight + broad sheen
+  float fres = pow(1.0 - n.z, 3.0) * 0.12;                       // grazing reflection on the bulging edges
+  // molten plastic: slightly more saturated, darker and translucent where it stretches
   vec3 rgb = c.rgb;
   float l = dot(rgb, vec3(0.299, 0.587, 0.114));
   rgb = mix(vec3(l), rgb, 1.0 + 0.2 * m);
@@ -1294,7 +1294,7 @@ function initGL() {
   prog.u = {};
   for (const n of ['uRes', 'uTex']) prog.u[n] = gl.getUniformLocation(prog, n);
 
-  // coordonnées de texture (fixes) + données dynamiques (position, pente, épaisseur, fusion)
+  // texture coordinates (fixed) + dynamic data (position, slope, thickness, melt)
   const { n, NV, tris } = TOPO, uv = new Float32Array(2 * NV);
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) { uv[2 * (j * n + i)] = i / SIM.N; uv[2 * (j * n + i) + 1] = j / SIM.N; }
   const uvb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, uvb);
@@ -1328,16 +1328,16 @@ function makeTexture(cv) {
   return t;
 }
 
-// remplit mesh.data pour la pièce p à l'instant tau (s) ; renvoie false si l'icône est intacte
+// fills mesh.data for piece p at time tau (s); returns false if the icon is intact
 function pieceGeometry(p, tau, W, H) {
   const { n, NV, NT, tris } = TOPO, s = p.sim, P = mesh.pos, D = mesh.data;
-  // position : interpolation entre deux images enregistrées
+  // position: interpolation between two recorded frames
   const f = tau * SIM.FPS, k0 = Math.floor(f), k1 = Math.min(p.frames, k0 + 1), w = f - k0;
   simulateTo(p, k1);
   const A = s.rec[Math.min(k0, p.frames)], B = s.rec[k1], iq = 1 / SIM.Q;
   for (let k = 0; k < 2 * NV; k++) P[k] = (A[k] * (1 - w) + B[k] * w) * iq;
   if (tau <= 0) for (let k = 0; k < NV; k++) { P[2 * k] = s.u[k] * s.aspect; P[2 * k + 1] = s.v[k]; }
-  // épaisseur (masse conservée) et pente de la surface du plastique
+  // thickness (mass conservation) and slope of the plastic surface
   const Aw = mesh.Aw, gz = mesh.gz, z = mesh.z;
   Aw.fill(0); gz.fill(0);
   const area = mesh.area;
@@ -1349,7 +1349,7 @@ function pieceGeometry(p, tau, W, H) {
   }
   for (let k = 0; k < NV; k++) {
     const h = s.Vv[k] / Aw[k];
-    // hauteur du relief : épaisseur × ménisque (bord arrondi), exagérée pour la lisibilité
+    // relief height: thickness × meniscus (rounded edge), exaggerated for readability
     z[k] = 0.08 * Math.sqrt(Math.min(h, 2.5)) * Math.sqrt(sstep(0, 0.75, s.edge[k]));
   }
   for (let t = 0; t < NT; t++) {
@@ -1367,7 +1367,7 @@ function pieceGeometry(p, tau, W, H) {
     const gx = gz[2 * k] / wA, gy = gz[2 * k + 1] / wA, gl2 = Math.hypot(gx, gy), lim = 2.5;
     D[o + 2] = gl2 > lim ? gx * lim / gl2 : gx;
     D[o + 3] = gl2 > lim ? gy * lim / gl2 : gy;
-    D[o + 4] = s.Aw0[k] / Aw[k];       // h / h0 (étirement)
+    D[o + 4] = s.Aw0[k] / Aw[k];       // h / h0 (stretch)
     D[o + 5] = heat(s, k, tau);
   }
 }
@@ -1393,7 +1393,7 @@ function render() {
 
 function tick(now) {
   const dt = Math.min(0.05, (now - lastNow) / 1000); lastNow = now;
-  // le retour rembobine la fonte (relecture de l'enregistrement), 3× plus vite
+  // reverse rewinds the melt (replaying the recording), 3× faster
   clock += dt * (dir > 0 ? 1 : -3);
   const end = Math.max(...pieces.map((p) => p.delay + p.dur));
   if (dir < 0 && clock <= 0) {
@@ -1404,13 +1404,13 @@ function tick(now) {
     return;
   }
   clock = Math.min(clock, end);
-  // pas de rendu inutile une fois la flaque figée (sauf redimensionnement)
+  // no needless rendering once the puddle has set (except on resize)
   const key = [clock, stage.clientWidth, stage.clientHeight, window.devicePixelRatio].join();
   if (key !== lastKey) { lastKey = key; render(); }
   rafId = requestAnimationFrame(tick);
 }
 
-// Toucher l'écran → les icônes fondent / se reforment (on peut inverser en cours de route)
+// Tap the screen → icons melt / re-form (can be reversed midway)
 viewer.addEventListener('click', () => {
   if (!pieces.length || !gl) return;
   if (state === 'idle') {
